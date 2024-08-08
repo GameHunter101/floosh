@@ -1,0 +1,18 @@
+[package]
+name = "floosh"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+gamezap = {git = "https://github.com/GameHunter101/gamezap-lib"}
+bytemuck = { version = "1.13.1", features = ["derive"] }
+tokio = {version = "1.35.1", features = ["full"]}
+wgpu = "0.17.0"
+nalgebra = "0.32.3"
+
+[dependencies.sdl2]
+version = "0.36"
+default-features = false
+features = ["raw-window-handle"]
