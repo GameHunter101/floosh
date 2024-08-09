@@ -227,7 +227,7 @@ checksum = "bf43edc576402991846b093a7ca18a3477e0ef9c588cde84964b5d3e43016642"
 [[package]]
 name = "cool_utils"
 version = "0.1.9"
-source = "git+https://github.com/GameHunter101/cool_utils.git#acb5b87239b344083c7103cc0c74a3f242b24c7c"
+source = "git+https://github.com/GameHunter101/cool_utils#acb5b87239b344083c7103cc0c74a3f242b24c7c"
 
 [[package]]
 name = "core-foundation"
@@ -340,6 +340,7 @@ name = "floosh"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cool_utils",
  "gamezap",
  "nalgebra",
  "sdl2",
