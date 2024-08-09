@@ -31,8 +31,7 @@ impl SimulatorComponent {
     fn add_source(resolution: usize, ring_buffer: &mut RingBuffer<Vec<Vec<f32>>>, dt: f32) {
         for i in 0..resolution + 2 {
             for j in 0..resolution + 2 {
-                let source_val = ring_buffer[1_i32][i][j] * dt;
-                ring_buffer[0_i32][i][j] += source_val;
+                ring_buffer[0_i32][i][j] += ring_buffer[1_i32][i][j] * dt;
             }
         }
     }
@@ -44,21 +43,20 @@ impl SimulatorComponent {
         dt: f32,
         boundary_type: i32,
     ) {
-        let final_coefficient = diffusion_coefficient * dt * resolution as f32 * resolution as f32;
+        let k = diffusion_coefficient * dt * resolution as f32 * resolution as f32;
 
         for _ in 0..20 {
             for i in 1..=resolution {
                 for j in 1..=resolution {
                     grid[0_i32][i][j] = (grid[1_i32][i][j]
-                        + (grid[0_i32][i - 1][j]
-                            + grid[0_i32][i + 1][j]
-                            + grid[0_i32][i][j - 1]
-                            + grid[0_i32][i][j + 1])
-                            * final_coefficient)
-                        / (1.0 + 4.0 * final_coefficient);
+                        + k / 4.0
+                            * (grid[0_i32][i + 1][j]
+                                + grid[0_i32][i - 1][j]
+                                + grid[0_i32][i][j + 1]
+                                + grid[0_i32][i][j - 1]))
+                        / (1.0 + k);
                 }
             }
-
             Self::set_boundary(resolution, &mut grid[0_i32], boundary_type);
         }
     }
@@ -71,32 +69,38 @@ impl SimulatorComponent {
         dt: f32,
         boundary_type: i32,
     ) {
-        let prev_dt = dt * resolution as f32;
-
         for i in 1..=resolution {
             for j in 1..=resolution {
-                let x = (i as f32 - prev_dt * velocity_x[i][j]).clamp(0.5, resolution as f32 + 0.5);
-                let y = (j as f32 - prev_dt * velocity_y[i][j]).clamp(0.5, resolution as f32 + 0.5);
+                let original_x =
+                    (i as f32 - velocity_x[i][j] * dt).clamp(0.5, resolution as f32 + 0.5);
+                let original_y =
+                    (j as f32 - velocity_y[i][j] * dt).clamp(0.5, resolution as f32 + 0.5);
 
-                let i_0 = x as usize;
-                let i_1 = i_0 + 1;
+                let floor_x = original_x as usize;
+                let floor_y = original_y as usize;
 
-                let j_0 = y as usize;
-                let j_1 = j_0 + 1;
+                let top_left_value = grid[1_i32][floor_x][floor_y];
+                let bottom_left_value = grid[1_i32][floor_x][floor_y + 1];
+                let top_right_value = grid[1_i32][floor_x + 1][floor_y];
+                let bottom_right_value = grid[1_i32][floor_x + 1][floor_y + 1];
 
-                let s_1 = x - i_0 as f32;
-                let s_0 = 1.0 - s_1;
+                let interpolated_top =
+                    Self::lerp(top_left_value, top_right_value, original_x.fract());
+                let interpolated_bottom =
+                    Self::lerp(bottom_left_value, bottom_right_value, original_x.fract());
 
-                let t_1 = y - j_0 as f32;
-                let t_0 = 1.0 - t_1;
+                let new_value =
+                    Self::lerp(interpolated_top, interpolated_bottom, original_y.fract());
 
-                grid[0_i32][i][j] = (grid[1_i32][i_0][j_0] * t_0 + grid[1_i32][i_0][j_1] * t_1)
-                    * s_0
-                    + (grid[1_i32][i_1][j_0] * t_0 + grid[1_i32][i_1][j_1] * t_1) * s_1;
+                grid[0_i32][i][j] = new_value;
             }
         }
 
         Self::set_boundary(resolution, &mut grid[0_i32], boundary_type)
+    }
+
+    fn lerp(a: f32, b: f32, k: f32) -> f32 {
+        a + k * (b - a)
     }
 
     fn set_boundary(resolution: usize, grid: &mut [Vec<f32>], boundary_type: i32) {
@@ -138,11 +142,12 @@ impl SimulatorComponent {
         p: &mut [Vec<f32>],
         div: &mut [Vec<f32>],
     ) {
-        let h = 1.0 / resolution as f32;
+        let cell_size = 1.0 / resolution as f32;
+
         for i in 1..=resolution {
             for j in 1..=resolution {
-                div[i][j] = -0.5 * h * (u[i + 1][j] - u[i - 1][j] + v[i][j + 1] - v[i][j - 1]);
-
+                div[i][j] =
+                    (u[i + 1][j] - u[i - 1][j] + v[i][j + 1] - v[i][j - 1]) / (2.0 * cell_size);
                 p[i][j] = 0.0;
             }
         }
@@ -154,7 +159,7 @@ impl SimulatorComponent {
             for i in 1..=resolution {
                 for j in 1..=resolution {
                     p[i][j] =
-                        (div[i][j] + p[i - 1][j] + p[i + 1][j] + p[i][j - 1] + p[i][j + 1]) / 4.0;
+                        (p[i - 1][j] + p[i + 1][j] + p[i][j - 1] + p[i][j + 1] - div[i][j]) / 4.0;
                 }
             }
             Self::set_boundary(resolution, p, 0);
@@ -162,8 +167,8 @@ impl SimulatorComponent {
 
         for i in 1..=resolution {
             for j in 1..=resolution {
-                u[i][j] -= 0.5 * (p[i + 1][j] - p[i - 1][j]) / h;
-                v[i][j] -= 0.5 * (p[i][j + 1] - p[i][j - 1]) / h;
+                u[i][j] -= (p[i + 1][j] - p[i - 1][j]) / (2.0 * cell_size);
+                v[i][j] -= (p[i][j + 1] - p[i][j - 1]) / (2.0 * cell_size);
             }
         }
 
@@ -245,10 +250,10 @@ impl SimulatorComponent {
     }
 
     fn density_step(&mut self, dt: f32) {
-        // println!("{}", self.density_grids[0_i32][50][50]);
+        // println!("A: {}", self.density_grids[0_i32][5][55]);
         Self::add_source(self.resolution, &mut self.density_grids, dt);
-        // println!("{}", self.density_grids[0_i32][50][50]);
         self.density_grids.rotate_left(1);
+        // println!("B: {}", self.density_grids[0_i32][5][55]);
         Self::diffuse(
             self.resolution,
             self.diffusion_coefficient,
@@ -256,7 +261,6 @@ impl SimulatorComponent {
             dt,
             0,
         );
-        // println!("{}", self.density_grids[0_i32][50][50]);
         self.density_grids.rotate_left(1);
         Self::advect(
             self.resolution,
@@ -266,7 +270,6 @@ impl SimulatorComponent {
             dt,
             0,
         );
-        // println!("{}", self.density_grids[0_i32][50][50]);
     }
 
     fn density_grid(&self) -> [[f32; 128]; 128] {
@@ -286,13 +289,23 @@ impl SimulatorComponent {
             .unwrap()
     }
 
-    fn velocity_grid(&self) -> [[f32;128]; 128] {
-        (1..=self.resolution).map(|i| {
-            let col: [f32; 128] = (1..=self.resolution).map(|j| {
-                (self.velocity_x_grids[0_i32][i][j].powi(2) + self.velocity_y_grids[0_i32][i][j].powi(2)).sqrt()
-            }).collect::<Vec<_>>().try_into().unwrap();
-            col
-        }).collect::<Vec<_>>().try_into().unwrap()
+    fn _velocity_grid(&self) -> [[f32; 128]; 128] {
+        (1..=self.resolution)
+            .map(|i| {
+                let col: [f32; 128] = (1..=self.resolution)
+                    .map(|j| {
+                        (self.velocity_x_grids[0_i32][i][j].powi(2)
+                            + self.velocity_y_grids[0_i32][i][j].powi(2))
+                        .sqrt()
+                    })
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
+                col
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
     }
 }
 
@@ -310,16 +323,16 @@ impl ComponentSystem for SimulatorComponent {
         for i in 0..10 {
             for j in 0..10 {
                 self.density_grids[0_i32][i][50 + j] = 1.0;
+                self.velocity_y_grids[0_i32][i][50 + j] = 100.0;
             }
         }
 
-        for i in 1..=self.resolution {
+        /* for i in 1..=self.resolution {
             for j in 1..=10 {
-                self.velocity_y_grids[0_i32][i][j] = 100000.0;
+                self.velocity_y_grids[1_i32][i][j] = 100.0;
             }
-        }
+        } */
     }
-
 
     fn update(
         &mut self,
@@ -337,20 +350,14 @@ impl ComponentSystem for SimulatorComponent {
         let details = engine_details.lock().unwrap();
         let dt = details.last_frame_duration.as_secs_f32();
 
-        println!("{}", self.density_grids[0_i32][50][50]);
+        // println!("{}", self.density_grids[0_i32][50][50]);
 
         /* for i in 0..10 {
             for j in 0..10 {
-                self.density_grids[1_i32][50 + i][50 + j] = 1.0;
-                // self.velocity_x_grids[0_i32][50 + i][50 + j] = 1.0;
+                self.density_grids[1_i32][i][50 + j] = 1.0;
+                self.velocity_y_grids[0_i32][i][50 + j] = 100.0;
             }
         } */
-
-        for i in 1..=self.resolution {
-            for j in 1..=10 {
-                self.velocity_y_grids[1_i32][i][j] = 100000.0;
-            }
-        }
 
         self.velocity_step(dt);
         self.density_step(dt);
@@ -359,7 +366,7 @@ impl ComponentSystem for SimulatorComponent {
         let selected_material = &mut materials.0[materials.1];
         if let Some((_, buffer)) = &selected_material.uniform_buffer_bind_group() {
             let grid_2 = self.density_grid();
-            // println!("{:?}", &grid_2[50][20]);
+            // println!("{:?}", &grid_2[5][55]);
             queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[grid_2]));
         }
     }

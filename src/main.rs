@@ -43,7 +43,7 @@ async fn main() {
 
     let concept_manager = scene.get_concept_manager();
 
-    let simulator_component = SimulatorComponent::new(128, 1.0, 10.0);
+    let simulator_component = SimulatorComponent::new(128, 0.0001, 0.0001);
 
     let canvas_mesh = MeshComponent::new(
         concept_manager,
