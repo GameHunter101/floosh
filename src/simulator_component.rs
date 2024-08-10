@@ -1,307 +1,155 @@
 #![allow(clippy::needless_range_loop)]
 use cool_utils::data_structures::ring_buffer::RingBuffer;
 use gamezap::new_component;
+use nalgebra::Vector2;
+
+static OVERRELAXATION_FACTOR: f32 = 1.9;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CellData {
+    density: f32,
+    pressure: f32,
+    is_fluid: i32,
+}
+
+impl CellData {}
 
 new_component!(SimulatorComponent {
     resolution: usize,
-    viscosity: f32,
     diffusion_coefficient: f32,
-    density_grids: RingBuffer<Vec<Vec<f32>>>,
-    velocity_x_grids: RingBuffer<Vec<Vec<f32>>>,
-    velocity_y_grids: RingBuffer<Vec<Vec<f32>>>
+    fluid_density: f32,
+    grid_u: Vec<Vec<f32>>,
+    grid_v: Vec<Vec<f32>>,
+    density_grid: Vec<Vec<f32>>,
+    pressure_grid: Vec<Vec<f32>>,
+    barrier_grid: Vec<Vec<f32>>,
+    cell_size: f32
 });
 
 impl SimulatorComponent {
-    pub fn new(resolution: usize, viscosity: f32, diffusion_coefficient: f32) -> Self {
-        let densities = vec![vec![0.0_f32; resolution + 2]; resolution + 2];
-        let velocities = vec![vec![0.0_f32; resolution + 2]; resolution + 2];
+    pub fn new(resolution: usize, fluid_density: f32, diffusion_coefficient: f32) -> Self {
+        let zero_grid = vec![vec![0.0; resolution + 2]; resolution + 2];
+        let barrier_grid = (0..resolution + 2)
+            .map(|i| {
+                (0..resolution + 2)
+                    .map(|j| {
+                        if i == 0 || i == resolution + 1 || j == 0 || j == resolution + 1 {
+                            0.0
+                        } else {
+                            1.0
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
 
         SimulatorComponent {
             resolution,
-            viscosity,
             diffusion_coefficient,
-            density_grids: RingBuffer::new(vec![densities; 2]),
-            velocity_x_grids: RingBuffer::new(vec![velocities.clone(); 2]),
-            velocity_y_grids: RingBuffer::new(vec![velocities; 2]),
+            fluid_density,
+            grid_u: zero_grid.clone(),
+            grid_v: zero_grid.clone(),
+            density_grid: zero_grid.clone(),
+            pressure_grid: zero_grid,
+            barrier_grid,
+            cell_size: 1.0 / resolution as f32,
             parent: 0,
             id: (u32::MAX, TypeId::of::<Self>(), u32::MAX),
         }
     }
 
-    fn add_source(resolution: usize, ring_buffer: &mut RingBuffer<Vec<Vec<f32>>>, dt: f32) {
-        for i in 0..resolution + 2 {
-            for j in 0..resolution + 2 {
-                ring_buffer[0_i32][i][j] += ring_buffer[1_i32][i][j] * dt;
+    fn add_forces(&mut self, forces: Vec<Vec<Vector2<f32>>>, dt: f32) {
+        for i in 1..=self.resolution {
+            for j in 1..=self.resolution {
+                /* let force = forces[i][j];
+
+                self.staggered_grid[0_i32][i][j].right_velocity += force.x * dt / 2.0;
+                self.staggered_grid[0_i32][i][j].left_velocity += force.x * dt / 2.0;
+
+                self.staggered_grid[0_i32][i][j].top_velocity += force.y * dt / 2.0;
+                self.staggered_grid[0_i32][i][j].bottom_velocity += force.y * dt / 2.0; */
             }
         }
     }
 
-    fn diffuse(
-        resolution: usize,
-        diffusion_coefficient: f32,
-        grid: &mut RingBuffer<Vec<Vec<f32>>>,
-        dt: f32,
-        boundary_type: i32,
-    ) {
-        let k = diffusion_coefficient * dt * resolution as f32 * resolution as f32;
-
+    fn solve_divergence(&mut self, dt: f32) {
         for _ in 0..20 {
-            for i in 1..=resolution {
-                for j in 1..=resolution {
-                    grid[0_i32][i][j] = (grid[1_i32][i][j]
-                        + k / 4.0
-                            * (grid[0_i32][i + 1][j]
-                                + grid[0_i32][i - 1][j]
-                                + grid[0_i32][i][j + 1]
-                                + grid[0_i32][i][j - 1]))
-                        / (1.0 + k);
+            for i in 1..=self.resolution {
+                for j in 1..=self.resolution {
+                    let divergence = OVERRELAXATION_FACTOR
+                        * (self.grid_v[i][j + 1] - self.grid_v[i][j] + self.grid_u[i + 1][j]
+                            - self.grid_u[i][j]);
+
+                    let surrounding_tiles = self.barrier_grid[i + 1][j]
+                        + self.barrier_grid[i - 1][j]
+                        + self.barrier_grid[i][j + 1]
+                        + self.barrier_grid[i][j - 1];
+
+                    if surrounding_tiles == 0.0 {
+                        continue;
+                    }
+
+                    self.pressure_grid[i][j] +=
+                        divergence / surrounding_tiles * self.fluid_density * self.cell_size / dt;
                 }
             }
-            Self::set_boundary(resolution, &mut grid[0_i32], boundary_type);
         }
     }
 
-    fn advect(
-        resolution: usize,
-        grid: &mut RingBuffer<Vec<Vec<f32>>>,
-        velocity_x: &[Vec<f32>],
-        velocity_y: &[Vec<f32>],
-        dt: f32,
-        boundary_type: i32,
-    ) {
+    fn advect(resolution: usize, grid: &mut [Vec<f32>], dt: f32, u: &[Vec<f32>], v: &[Vec<f32>]) {
         for i in 1..=resolution {
             for j in 1..=resolution {
-                let original_x =
-                    (i as f32 - velocity_x[i][j] * dt).clamp(0.5, resolution as f32 + 0.5);
-                let original_y =
-                    (j as f32 - velocity_y[i][j] * dt).clamp(0.5, resolution as f32 + 0.5);
+                let last_x = i as f32 - u[i][j] * dt;
+                let last_y =
+                    j as f32 - (v[i - 1][j] + v[i - 1][j + 1] + v[i][j] + v[i][j + 1]) * dt / 4.0;
 
-                let floor_x = original_x as usize;
-                let floor_y = original_y as usize;
+                let top_left_value = grid[last_x as usize][last_y as usize + 1];
+                let top_right_value = grid[last_x as usize + 1][last_y as usize + 1];
+                let bottom_left_value = grid[last_x as usize][last_y as usize];
+                let bottom_right_value = grid[last_x as usize + 1][last_y as usize];
 
-                let top_left_value = grid[1_i32][floor_x][floor_y];
-                let bottom_left_value = grid[1_i32][floor_x][floor_y + 1];
-                let top_right_value = grid[1_i32][floor_x + 1][floor_y];
-                let bottom_right_value = grid[1_i32][floor_x + 1][floor_y + 1];
+                let top_lerp = Self::lerp(top_left_value, top_right_value, last_x.fract());
+                let bottom_lerp = Self::lerp(bottom_left_value, bottom_right_value, last_x.fract());
 
-                let interpolated_top =
-                    Self::lerp(top_left_value, top_right_value, original_x.fract());
-                let interpolated_bottom =
-                    Self::lerp(bottom_left_value, bottom_right_value, original_x.fract());
+                let final_lerp_value = Self::lerp(bottom_lerp, top_lerp, last_y.fract());
 
-                let new_value =
-                    Self::lerp(interpolated_top, interpolated_bottom, original_y.fract());
-
-                grid[0_i32][i][j] = new_value;
+                grid[i][j] = final_lerp_value;
             }
         }
-
-        Self::set_boundary(resolution, &mut grid[0_i32], boundary_type)
     }
 
     fn lerp(a: f32, b: f32, k: f32) -> f32 {
         a + k * (b - a)
     }
 
-    fn set_boundary(resolution: usize, grid: &mut [Vec<f32>], boundary_type: i32) {
-        for i in 1..=resolution {
-            grid[0][i] = if boundary_type == 1 {
-                -grid[1][i]
-            } else {
-                grid[1][i]
-            };
-            grid[resolution + 1][i] = if boundary_type == 1 {
-                -grid[resolution][i]
-            } else {
-                grid[resolution][i]
-            };
+    fn simulate(&mut self, dt: f32) {
+        self.solve_divergence(dt);
 
-            grid[i][0] = if boundary_type == 2 {
-                -grid[i][1]
-            } else {
-                grid[i][1]
-            };
-            grid[i][resolution + 1] = if boundary_type == 2 {
-                -grid[i][resolution]
-            } else {
-                grid[i][resolution]
-            };
-        }
+        let mut grid_u = self.grid_u.clone();
+        Self::advect(self.resolution, &mut grid_u, dt, &self.grid_u, &self.grid_v);
+        self.grid_u = grid_u;
 
-        grid[0][0] = (grid[1][0] + grid[0][1]) * 0.5;
-        grid[0][resolution + 1] = (grid[1][resolution + 1] + grid[0][resolution]) * 0.5;
-        grid[resolution + 1][0] = (grid[resolution][0] + grid[resolution + 1][1]) * 0.5;
-        grid[resolution + 1][resolution + 1] =
-            (grid[resolution][resolution + 1] + grid[resolution + 1][resolution]) * 0.5;
-    }
+        let mut grid_v = self.grid_v.clone();
+        Self::advect(self.resolution, &mut grid_v, dt, &self.grid_u, &self.grid_v);
+        self.grid_u = grid_v;
 
-    fn project(
-        resolution: usize,
-        u: &mut [Vec<f32>],
-        v: &mut [Vec<f32>],
-        p: &mut [Vec<f32>],
-        div: &mut [Vec<f32>],
-    ) {
-        let cell_size = 1.0 / resolution as f32;
-
-        for i in 1..=resolution {
-            for j in 1..=resolution {
-                div[i][j] =
-                    (u[i + 1][j] - u[i - 1][j] + v[i][j + 1] - v[i][j - 1]) / (2.0 * cell_size);
-                p[i][j] = 0.0;
-            }
-        }
-
-        Self::set_boundary(resolution, div, 0);
-        Self::set_boundary(resolution, p, 0);
-
-        for _ in 0..20 {
-            for i in 1..=resolution {
-                for j in 1..=resolution {
-                    p[i][j] =
-                        (p[i - 1][j] + p[i + 1][j] + p[i][j - 1] + p[i][j + 1] - div[i][j]) / 4.0;
-                }
-            }
-            Self::set_boundary(resolution, p, 0);
-        }
-
-        for i in 1..=resolution {
-            for j in 1..=resolution {
-                u[i][j] -= (p[i + 1][j] - p[i - 1][j]) / (2.0 * cell_size);
-                v[i][j] -= (p[i][j + 1] - p[i][j - 1]) / (2.0 * cell_size);
-            }
-        }
-
-        Self::set_boundary(resolution, u, 1);
-        Self::set_boundary(resolution, v, 2);
-    }
-
-    fn velocity_step(&mut self, dt: f32) {
-        Self::add_source(self.resolution, &mut self.velocity_x_grids, dt);
-        Self::add_source(self.resolution, &mut self.velocity_y_grids, dt);
-
-        self.velocity_x_grids.rotate_left(1);
-        Self::diffuse(
-            self.resolution,
-            self.viscosity,
-            &mut self.velocity_x_grids,
-            dt,
-            1,
-        );
-        self.velocity_y_grids.rotate_left(1);
-        Self::diffuse(
-            self.resolution,
-            self.viscosity,
-            &mut self.velocity_y_grids,
-            dt,
-            2,
-        );
-
-        let mut old_x_vel = self.velocity_x_grids[1_i32].clone();
-        let mut old_y_vel = self.velocity_y_grids[1_i32].clone();
-
-        Self::project(
-            self.resolution,
-            &mut self.velocity_x_grids[0_i32],
-            &mut self.velocity_y_grids[0_i32],
-            &mut old_x_vel,
-            &mut old_y_vel,
-        );
-
-        self.velocity_x_grids[0_i32] = old_x_vel;
-        self.velocity_y_grids[0_i32] = old_y_vel;
-
-        self.velocity_x_grids.rotate_left(1);
-        self.velocity_y_grids.rotate_left(1);
-
-        let old_x_grid = self.velocity_x_grids[1_i32].clone();
         Self::advect(
             self.resolution,
-            &mut self.velocity_x_grids,
-            &old_x_grid,
-            &self.velocity_y_grids[1_i32],
+            &mut self.density_grid,
             dt,
-            1,
-        );
-
-        let old_y_grid = self.velocity_y_grids[1_i32].clone();
-        Self::advect(
-            self.resolution,
-            &mut self.velocity_y_grids,
-            &self.velocity_x_grids[1_i32],
-            &old_y_grid,
-            dt,
-            2,
-        );
-
-        let mut old_x_vel = self.velocity_x_grids[1_i32].clone();
-        let mut old_y_vel = self.velocity_y_grids[1_i32].clone();
-
-        Self::project(
-            self.resolution,
-            &mut self.velocity_x_grids[0_i32],
-            &mut self.velocity_y_grids[0_i32],
-            &mut old_x_vel,
-            &mut old_y_vel,
-        );
-
-        self.velocity_x_grids[0_i32] = old_x_vel;
-        self.velocity_y_grids[0_i32] = old_y_vel;
-    }
-
-    fn density_step(&mut self, dt: f32) {
-        // println!("A: {}", self.density_grids[0_i32][5][55]);
-        Self::add_source(self.resolution, &mut self.density_grids, dt);
-        self.density_grids.rotate_left(1);
-        // println!("B: {}", self.density_grids[0_i32][5][55]);
-        Self::diffuse(
-            self.resolution,
-            self.diffusion_coefficient,
-            &mut self.density_grids,
-            dt,
-            0,
-        );
-        self.density_grids.rotate_left(1);
-        Self::advect(
-            self.resolution,
-            &mut self.density_grids,
-            &self.velocity_x_grids[0_i32],
-            &self.velocity_y_grids[0_i32],
-            dt,
-            0,
+            &self.grid_u,
+            &self.grid_v,
         );
     }
 
     fn density_grid(&self) -> [[f32; 128]; 128] {
-        self.density_grids[0_i32][1..=self.resolution]
+        self.grid_u[1..=self.resolution]
             .iter()
             .map(|row| {
                 let arr: [f32; 128] = row.clone()[1..=self.resolution]
-                    /* .iter()
-                    .map(|v| v.magnitude())
-                    .collect::<Vec<_>>() */
                     .try_into()
                     .unwrap();
                 arr
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-
-    fn _velocity_grid(&self) -> [[f32; 128]; 128] {
-        (1..=self.resolution)
-            .map(|i| {
-                let col: [f32; 128] = (1..=self.resolution)
-                    .map(|j| {
-                        (self.velocity_x_grids[0_i32][i][j].powi(2)
-                            + self.velocity_y_grids[0_i32][i][j].powi(2))
-                        .sqrt()
-                    })
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap();
-                col
             })
             .collect::<Vec<_>>()
             .try_into()
@@ -320,18 +168,14 @@ impl ComponentSystem for SimulatorComponent {
         _engine_systems: Option<Rc<Mutex<EngineSystems>>>,
         _ui_manager: Rc<Mutex<gamezap::ui_manager::UiManager>>,
     ) {
-        for i in 0..10 {
-            for j in 0..10 {
-                self.density_grids[0_i32][i][50 + j] = 1.0;
-                self.velocity_y_grids[0_i32][i][50 + j] = 100.0;
+        for i in 50..60 {
+            for j in 50..60 {
+                self.density_grid[i][j] = 1.0;
+                self.grid_u[i][j] = 1.0;
             }
         }
 
-        /* for i in 1..=self.resolution {
-            for j in 1..=10 {
-                self.velocity_y_grids[1_i32][i][j] = 100.0;
-            }
-        } */
+        // self.add_forces(forces, dt)
     }
 
     fn update(
@@ -348,25 +192,15 @@ impl ComponentSystem for SimulatorComponent {
         _compute_pipelines: &[ComputePipeline],
     ) {
         let details = engine_details.lock().unwrap();
-        let dt = details.last_frame_duration.as_secs_f32();
+        let dt = details.last_frame_duration.as_secs_f32() * 100.0;
 
-        // println!("{}", self.density_grids[0_i32][50][50]);
-
-        /* for i in 0..10 {
-            for j in 0..10 {
-                self.density_grids[1_i32][i][50 + j] = 1.0;
-                self.velocity_y_grids[0_i32][i][50 + j] = 100.0;
-            }
-        } */
-
-        self.velocity_step(dt);
-        self.density_step(dt);
+        self.simulate(dt);
 
         let materials = materials.unwrap();
         let selected_material = &mut materials.0[materials.1];
         if let Some((_, buffer)) = &selected_material.uniform_buffer_bind_group() {
             let grid_2 = self.density_grid();
-            // println!("{:?}", &grid_2[5][55]);
+            println!("{:?}", &grid_2[50][50]);
             queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[grid_2]));
         }
     }
