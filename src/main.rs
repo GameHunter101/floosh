@@ -13,7 +13,7 @@ async fn main() {
     let video_subsystem = sdl_context.video().unwrap();
     let event_pump = sdl_context.event_pump().unwrap();
     let application_title = "Floosh";
-    let window_size = (128 * 7, 128 * 7);
+    let window_size = (512, 512);
     let window = video_subsystem
         .window(application_title, window_size.0, window_size.1)
         .resizable()
@@ -38,12 +38,13 @@ async fn main() {
         .await;
 
     let device = engine.renderer.device.clone();
+    let queue = engine.renderer.queue.clone();
 
     let mut scene = Scene::default();
 
     let concept_manager = scene.get_concept_manager();
 
-    let simulator_component = SimulatorComponent::new(128, 1.0);
+    let simulator_component = SimulatorComponent::new(512, 1.0);
 
     let canvas_mesh = MeshComponent::new(
         concept_manager,
@@ -72,33 +73,25 @@ async fn main() {
         vec![0, 1, 2, 0, 2, 3],
     );
 
-    let data: [[f32; 128]; 128] = (0..128)
-        .map(|i| {
-            let test: [f32; 128] = (0..128)
-                .map(|j| ((i as f32).powi(2) + (j as f32).powi(2)).sqrt() / 128.0)
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap();
-            test
-        })
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-
-    // println!("{} {}", data[0][0], data[127][127]);
-    //
-    let bytes: [u8; 4 * 128 * 128] = zerocopy::transmute!([[0.0_f32; 128]; 128]);
+    // let bytes: [u8; 4 * 128 * 128] = zerocopy::transmute!([[0.0_f32; 128]; 128]);
 
     let simulator_material = Material::new(
         "shaders/vert.wgsl",
         "shaders/frag.wgsl",
-        Vec::new(),
-        Some(&bytes),
+        vec![gamezap::texture::Texture::blank_texture(
+            &device.clone(),
+            &queue,
+            256,
+            256,
+            Some("test tex"),
+            true,
+        ).unwrap()],
+        // Some(&bytes),
+        None,
         // Some(bytemuck::cast_slice(&[data])),
         true,
         device,
     );
-    println!("here");
 
     let _simulation = scene.create_entity(
         0,

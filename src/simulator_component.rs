@@ -339,7 +339,7 @@ impl SimulatorComponent {
         self.grid_v.rotate_left(1);
     }
 
-    fn velocity_grid(&self) -> [[f32; 128]; 128] {
+    /* fn velocity_grid(&self) -> [[f32; 128]; 128] {
         (1..=self.resolution)
             .map(|i| {
                 let new_row: [f32; 128] = (1..=self.resolution)
@@ -366,7 +366,7 @@ impl SimulatorComponent {
             .collect::<Vec<_>>()
             .try_into()
             .unwrap()
-    }
+    } */
 }
 
 impl ComponentSystem for SimulatorComponent {
@@ -393,7 +393,7 @@ impl ComponentSystem for SimulatorComponent {
 
     fn update(
         &mut self,
-        _device: Arc<Device>,
+        device: Arc<Device>,
         queue: Arc<Queue>,
         _component_map: &mut AllComponents,
         engine_details: Rc<Mutex<EngineDetails>>,
@@ -405,7 +405,7 @@ impl ComponentSystem for SimulatorComponent {
         _compute_pipelines: &[ComputePipeline],
     ) {
         let details = engine_details.lock().unwrap();
-        let dt = details.last_frame_duration.as_secs_f32();
+        let dt = details.last_frame_duration.as_secs_f32() * 5.0;
 
         /* for i in 2..=self.resolution {
             for j in 2..=self.resolution {
@@ -415,13 +415,32 @@ impl ComponentSystem for SimulatorComponent {
         self.simulate(dt);
         // println!("frame");
 
+        let rgba =
+            image::RgbaImage::from_fn(self.resolution as u32, self.resolution as u32, |x, y| {
+                image::Rgba(
+                    [Self::lerp(0.0, 255.0, self.pressure_grid[y as usize][x as usize]) as u8; 4],
+                )
+            });
+
+        let tex = gamezap::texture::Texture::from_rgba(
+            &device,
+            &queue,
+            &rgba,
+            Some("Pressure texture"),
+            false,
+            false,
+        )
+        .unwrap();
+
         let materials = materials.unwrap();
-        let selected_material = &mut materials.0[materials.1];
+        materials.0[0].update_textures(device, vec![&tex]);
+
+        /* let selected_material = &mut materials.0[materials.1];
         if let Some((_, buffer)) = &selected_material.uniform_buffer_bind_group() {
             let grid_2 = self.pressure_grid();
             // println!("{:?}", &grid_2[50][50]);
             let bytes: [u8; 4 * 128 * 128] = zerocopy::transmute!(grid_2);
             queue.write_buffer(buffer, 0, &bytes);
-        }
+        } */
     }
 }
