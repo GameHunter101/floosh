@@ -10,8 +10,10 @@ gamezap = {git = "https://github.com/GameHunter101/gamezap-lib"}
 bytemuck = { version = "1.13.1", features = ["derive"] }
 tokio = {version = "1.35.1", features = ["full"]}
 wgpu = "0.17.0"
-nalgebra = "0.32.3"
+nalgebra = "0.33.0"
 cool_utils = {git = "https://github.com/GameHunter101/cool_utils"}
+nalgebra-sparse = "0.10.0"
+zerocopy = "0.7.35"
 
 [dependencies.sdl2]
 version = "0.36"

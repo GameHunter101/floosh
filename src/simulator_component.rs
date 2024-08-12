@@ -2,6 +2,7 @@
 use cool_utils::data_structures::ring_buffer::RingBuffer;
 use gamezap::new_component;
 use nalgebra::Vector2;
+use nalgebra_sparse::CsrMatrix;
 
 static OVERRELAXATION_FACTOR: f32 = 1.9;
 
@@ -15,17 +16,17 @@ impl CellData {}
 
 new_component!(SimulatorComponent {
     resolution: usize,
-    diffusion_coefficient: f32,
     fluid_density: f32,
     grid_u: RingBuffer<Vec<Vec<f32>>>,
     grid_v: RingBuffer<Vec<Vec<f32>>>,
     // grid_contents: Vec<Vec<CellData>>,
     pressure_grid: Vec<Vec<f32>>,
+    pressure_divergence_mat: CsrMatrix<f32>,
     cell_size: f32
 });
 
 impl SimulatorComponent {
-    pub fn new(resolution: usize, fluid_density: f32, diffusion_coefficient: f32) -> Self {
+    pub fn new(resolution: usize, fluid_density: f32) -> Self {
         let grid_u = vec![vec![0.0; resolution + 2]; resolution + 2];
         let grid_v = vec![vec![0.0; resolution + 2]; resolution + 2];
 
@@ -47,18 +48,78 @@ impl SimulatorComponent {
         .collect::<Vec<_>>(); */
 
         let pressure_grid = vec![vec![0.0; resolution]; resolution];
+        let pressure_divergence_mat = Self::calculate_cell_pressure_divergence(resolution);
 
         SimulatorComponent {
             resolution,
-            diffusion_coefficient,
             fluid_density,
             grid_u: RingBuffer::new(vec![grid_u; 2]),
             grid_v: RingBuffer::new(vec![grid_v; 2]),
             pressure_grid,
+            pressure_divergence_mat,
             cell_size: 1.0 / resolution as f32,
             parent: 0,
             id: (u32::MAX, TypeId::of::<Self>(), u32::MAX),
         }
+    }
+
+    fn calculate_cell_pressure_divergence(resolution: usize) -> CsrMatrix<f32> {
+        let mut values = Vec::with_capacity(
+            5 * (resolution - 2) * (resolution - 2) + 4 * 3 + 4 * (resolution - 2) * 4,
+        );
+        let mut column_indices = Vec::with_capacity(
+            5 * (resolution - 2) * (resolution - 2) + 4 * 3 + 4 * (resolution - 2) * 4,
+        );
+        let mut row_indices = Vec::with_capacity(resolution * resolution + 1);
+        // dbg!(row_indices.capacity());
+        row_indices.push(0);
+
+        for i in 0..resolution {
+            for j in 0..resolution {
+                let cell_count = i * resolution + j;
+                let mut neighbors = Vec::new();
+
+                if i > 0 {
+                    neighbors.push((i - 1) * resolution + j);
+                }
+                if i + 1 < resolution {
+                    neighbors.push((i + 1) * resolution + j);
+                }
+                if j > 0 {
+                    neighbors.push(i * resolution + (j - 1));
+                }
+                if j + 1 < resolution {
+                    neighbors.push(i * resolution + (j + 1));
+                }
+
+                neighbors.push(cell_count);
+                neighbors.sort();
+
+                for neighbor in &neighbors {
+                    if *neighbor == cell_count {
+                        values.push(neighbors.len() as f32);
+                    } else {
+                        values.push(1.0_f32);
+                    }
+                    column_indices.push(*neighbor);
+                }
+
+                // values.push(neighbors.len() as f32);
+                // column_indices.push(cell_count);
+                row_indices.push(values.len());
+            }
+        }
+        // row_indices.push(values.len());
+        // dbg!(row_indices.len());
+
+        CsrMatrix::try_from_csr_data(
+            resolution * resolution,
+            resolution * resolution,
+            row_indices,
+            column_indices,
+            values,
+        )
+        .unwrap()
     }
 
     fn lerp(a: f32, b: f32, k: f32) -> f32 {
@@ -95,67 +156,165 @@ impl SimulatorComponent {
         }
     }
 
-    fn project(resolution: usize, dt: f32, u: &mut [Vec<f32>], v: &mut [Vec<f32>]) {
-        let mut divergence_vector = nalgebra::dvector![];// Vec::with_capacity(resolution * resolution);
+    fn project(
+        resolution: usize,
+        dt: f32,
+        u: &mut [Vec<f32>],
+        v: &mut [Vec<f32>],
+        pressure_grid: &mut [Vec<f32>],
+        pressure_divergence_mat: &CsrMatrix<f32>,
+    ) {
+        let mut divergence_vector = Vec::with_capacity(resolution * resolution); // Vec::with_capacity(resolution * resolution);
 
         for i in 1..=resolution {
             for j in 1..=resolution {
                 if i == 1 {
                     if j == 1 {
-                        divergence_vector.push(u[i][j+1] + v[i+1][j]);
+                        divergence_vector.push(u[i][j + 1] + v[i + 1][j]);
                         continue;
                     }
                     if j == resolution {
-                        divergence_vector.push(u[i][j] - v[i+1][j]);
+                        divergence_vector.push(u[i][j] - v[i + 1][j]);
                         continue;
                     }
-                    divergence_vector.push(u[i][j+1] - u[i][j] + v[i+1][j]);
+                    divergence_vector.push(u[i][j + 1] - u[i][j] + v[i + 1][j]);
                     continue;
                 }
                 if i == resolution {
                     if j == 1 {
-                        divergence_vector.push(u[i][j+1] - v[i][j]);
+                        divergence_vector.push(u[i][j + 1] - v[i][j]);
                         continue;
                     }
                     if j == resolution {
                         divergence_vector.push(u[i][j] + v[i][j]);
                         continue;
                     }
-                    divergence_vector.push(u[i][j+1] - u[i][j] + v[i][j]);
+                    divergence_vector.push(u[i][j + 1] - u[i][j] + v[i][j]);
                     continue;
                 }
                 if j == 1 {
-                    divergence_vector.push(u[i][j+1] + v[i][j] - v[i+1][j]);
+                    divergence_vector.push(u[i][j + 1] + v[i][j] - v[i + 1][j]);
                     continue;
                 }
                 if j == resolution {
-                    divergence_vector.push(u[i][j] + v[i][j] - v[i+1][j]);
+                    divergence_vector.push(u[i][j] + v[i][j] - v[i + 1][j]);
                     continue;
                 }
 
-                divergence_vector.push(u[i][j] - u[i][j+1] + v[i][j] - v[i+1][j]);
+                divergence_vector.push(u[i][j] - u[i][j + 1] + v[i][j] - v[i + 1][j]);
             }
         }
 
+        let divergence_vector = nalgebra::DVector::from_column_slice(&divergence_vector);
+
         let mut estimate = nalgebra::DVector::<f32>::zeros(divergence_vector.len());
-        
+
         let mut residual = divergence_vector.clone();
 
         let mut direction = residual.clone();
 
         let mut error_squared_magnitude = residual.magnitude_squared();
 
-        for _ in 0..20 {
-            if error_squared_magnitude < 0.1 {
+        for k in 0..20 {
+            if error_squared_magnitude < 0.01 {
                 break;
             }
-            for i in 1..=resolution {
-                for j in 1..=resolution {}
+            let dir_clone = direction.clone();
+
+            let ap = pressure_divergence_mat * &direction;
+            let alpha = error_squared_magnitude / (direction.dot(&ap));
+
+            estimate += alpha * dir_clone;
+            residual -= alpha * ap;
+
+            let new_error_squared_magnitude = residual.magnitude_squared();
+
+            let beta = new_error_squared_magnitude / error_squared_magnitude;
+
+            error_squared_magnitude = new_error_squared_magnitude;
+
+            direction *= beta;
+
+            direction += &residual;
+        }
+
+        for (cell_id, val) in estimate.iter().enumerate() {
+            let i = cell_id / resolution;
+            let j = cell_id % resolution;
+            pressure_grid[i][j] = *val;
+        }
+
+        for i in 1..=resolution {
+            for j in 1..=resolution {
+                let cell_id = (i - 1) * resolution + (j - 1);
+                let div = divergence_vector[cell_id];
+
+                if i == 1 {
+                    if j == 1 {
+                        u[i][j + 1] -= div / 2.0;
+                        v[i + 1][j] -= div / 2.0;
+                        continue;
+                    }
+
+                    if j == resolution {
+                        u[i][j] += div / 2.0;
+                        v[i + 1][j] -= div / 2.0;
+                        continue;
+                    }
+
+                    u[i][j] += div / 3.0;
+                    u[i][j + 1] -= div / 3.0;
+                    v[i + 1][j] -= div / 3.0;
+                    continue;
+                }
+                if i == resolution {
+                    if j == 1 {
+                        u[i][j + 1] -= div / 2.0;
+                        v[i][j] += div / 2.0;
+                        continue;
+                    }
+                    if j == resolution {
+                        u[i][j] += div / 2.0;
+                        v[i][j] += div / 2.0;
+                        continue;
+                    }
+
+                    u[i][j] += div / 3.0;
+                    u[i][j + 1] -= div / 3.0;
+                    v[i][j] += div / 3.0;
+                    continue;
+                }
+                if j == 1 {
+                    u[i][j + 1] -= div / 3.0;
+                    v[i][j] += div / 3.0;
+                    v[i + 1][j] -= div / 3.0;
+                    continue;
+                }
+                if j == resolution {
+                    u[i][j] += div / 3.0;
+                    v[i][j] += div / 3.0;
+                    v[i + 1][j] -= div / 3.0;
+                    continue;
+                }
+
+                u[i][j] += div / 4.0;
+                u[i][j + 1] -= div / 4.0;
+                v[i][j] += div / 4.0;
+                v[i + 1][j] -= div / 4.0;
             }
         }
     }
 
     fn simulate(&mut self, dt: f32) {
+        Self::project(
+            self.resolution,
+            dt,
+            &mut self.grid_u[0_i32],
+            &mut self.grid_v[0_i32],
+            &mut self.pressure_grid,
+            &self.pressure_divergence_mat,
+        );
+
         let mut grid_u = self.grid_u.clone();
         Self::advect(
             self.resolution,
@@ -190,6 +349,18 @@ impl SimulatorComponent {
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap();
+                new_row
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
+    }
+
+    fn pressure_grid(&self) -> [[f32; 128]; 128] {
+        self.pressure_grid
+            .iter()
+            .map(|row| {
+                let new_row: [f32; 128] = row.to_vec().try_into().unwrap();
                 new_row
             })
             .collect::<Vec<_>>()
@@ -236,14 +407,21 @@ impl ComponentSystem for SimulatorComponent {
         let details = engine_details.lock().unwrap();
         let dt = details.last_frame_duration.as_secs_f32();
 
+        /* for i in 2..=self.resolution {
+            for j in 2..=self.resolution {
+                self.grid_v[0_i32][i][j] = 1.0;
+            }
+        } */
         self.simulate(dt);
+        // println!("frame");
 
         let materials = materials.unwrap();
         let selected_material = &mut materials.0[materials.1];
         if let Some((_, buffer)) = &selected_material.uniform_buffer_bind_group() {
-            let grid_2 = self.velocity_grid();
+            let grid_2 = self.pressure_grid();
             // println!("{:?}", &grid_2[50][50]);
-            queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[grid_2]));
+            let bytes: [u8; 4 * 128 * 128] = zerocopy::transmute!(grid_2);
+            queue.write_buffer(buffer, 0, &bytes);
         }
     }
 }

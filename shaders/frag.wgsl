@@ -15,7 +15,7 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     let vec_index = y_coord / 4u;
     let rem = y_coord % 4u;
 
-    let value = grid[x_coord][vec_index][rem];
+    let value = grid[x_coord][vec_index][rem] / 10.0;
 
     return vec4f(value, value, value, 1.0);
 }

@@ -43,7 +43,7 @@ async fn main() {
 
     let concept_manager = scene.get_concept_manager();
 
-    let simulator_component = SimulatorComponent::new(128, 1.0, 0.0001);
+    let simulator_component = SimulatorComponent::new(128, 1.0);
 
     let canvas_mesh = MeshComponent::new(
         concept_manager,
@@ -85,17 +85,20 @@ async fn main() {
         .try_into()
         .unwrap();
 
-    println!("{} {}", data[0][0], data[127][127]);
+    // println!("{} {}", data[0][0], data[127][127]);
+    //
+    let bytes: [u8; 4 * 128 * 128] = zerocopy::transmute!([[0.0_f32; 128]; 128]);
 
     let simulator_material = Material::new(
         "shaders/vert.wgsl",
         "shaders/frag.wgsl",
         Vec::new(),
-        Some(bytemuck::cast_slice(&[[0.0_f32; 128]; 128])),
+        Some(&bytes),
         // Some(bytemuck::cast_slice(&[data])),
         true,
         device,
     );
+    println!("here");
 
     let _simulation = scene.create_entity(
         0,
