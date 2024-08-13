@@ -15,6 +15,7 @@ cool_utils = {git = "https://github.com/GameHunter101/cool_utils"}
 nalgebra-sparse = "0.10.0"
 zerocopy = "0.7.35"
 image = "0.24.6"
+imgui = {version = "0.11.0", features = ["tables-api"]}
 
 [dependencies.sdl2]
 version = "0.36"

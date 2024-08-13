@@ -1,394 +1,288 @@
-#![allow(clippy::needless_range_loop)]
 use cool_utils::data_structures::ring_buffer::RingBuffer;
 use gamezap::new_component;
-use nalgebra::Vector2;
-use nalgebra_sparse::CsrMatrix;
-
-static OVERRELAXATION_FACTOR: f32 = 1.9;
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct CellData {
-    pressure: f32,
-    is_fluid: i32,
-}
-
-impl CellData {}
 
 new_component!(SimulatorComponent {
     resolution: usize,
-    fluid_density: f32,
-    grid_u: RingBuffer<Vec<Vec<f32>>>,
-    grid_v: RingBuffer<Vec<Vec<f32>>>,
-    // grid_contents: Vec<Vec<CellData>>,
-    pressure_grid: Vec<Vec<f32>>,
-    pressure_divergence_mat: CsrMatrix<f32>,
-    cell_size: f32
+    diffusion_coefficient: f32,
+    viscosity: f32,
+    grid_u: Vec<Vec<f32>>,
+    grid_v: Vec<Vec<f32>>,
+    grid_u_0: Vec<Vec<f32>>,
+    grid_v_0: Vec<Vec<f32>>,
+    density_grid: Vec<Vec<f32>>,
+    scratchpad: Vec<Vec<f32>>
 });
 
 impl SimulatorComponent {
-    pub fn new(resolution: usize, fluid_density: f32) -> Self {
-        let grid_u = vec![vec![0.0; resolution + 2]; resolution + 2];
-        let grid_v = vec![vec![0.0; resolution + 2]; resolution + 2];
+    pub fn new(
+        concept_manager: Rc<Mutex<ConceptManager>>,
+        resolution: usize,
+        diffusion_coefficient: f32,
+        viscosity: f32,
+    ) -> Self {
+        let zeroes = vec![vec![0.0; resolution + 2]; resolution + 2];
 
-        /* let grid_contents = (0..resolution + 2)
-        .map(|i| {
-            (0..resolution + 2)
-                .map(|j| {
-                    if i == 0 || i == resolution + 1 || j == 0 || j == resolution + 1 {
-                        CellData::default()
-                    } else {
-                        CellData {
-                            pressure: 0.0,
-                            is_fluid: 1.0,
-                        }
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>(); */
-
-        let pressure_grid = vec![vec![0.0; resolution]; resolution];
-        let pressure_divergence_mat = Self::calculate_cell_pressure_divergence(resolution);
-
-        SimulatorComponent {
+        let mut component = SimulatorComponent {
             resolution,
-            fluid_density,
-            grid_u: RingBuffer::new(vec![grid_u; 2]),
-            grid_v: RingBuffer::new(vec![grid_v; 2]),
-            pressure_grid,
-            pressure_divergence_mat,
-            cell_size: 1.0 / resolution as f32,
+            diffusion_coefficient,
+            viscosity,
+            grid_u: zeroes.clone(),
+            grid_v: zeroes.clone(),
+            grid_u_0: zeroes.clone(),
+            grid_v_0: zeroes.clone(),
+            density_grid: zeroes.clone(),
+            scratchpad: zeroes,
             parent: 0,
             id: (u32::MAX, TypeId::of::<Self>(), u32::MAX),
-        }
+        };
+
+        let mut concepts: HashMap<String, Box<dyn Any>> = HashMap::new();
+        concepts.insert(
+            "forces_x".to_string(),
+            Box::new(vec![vec![0.0_f32; resolution]; resolution]),
+        );
+        concepts.insert(
+            "forces_y".to_string(),
+            Box::new(vec![vec![0.0_f32; resolution]; resolution]),
+        );
+        concepts.insert(
+            "added_densities".to_string(),
+            Box::new(vec![vec![0.0_f32; resolution]; resolution]),
+        );
+        concepts.insert(
+            "mouse_positions".to_string(),
+            Box::new(RingBuffer::new(vec![(0_i32, 0); 20])),
+        );
+
+        component.register_component(concept_manager, concepts);
+
+        component
     }
 
-    fn calculate_cell_pressure_divergence(resolution: usize) -> CsrMatrix<f32> {
-        let mut values = Vec::with_capacity(
-            5 * (resolution - 2) * (resolution - 2) + 4 * 3 + 4 * (resolution - 2) * 4,
-        );
-        let mut column_indices = Vec::with_capacity(
-            5 * (resolution - 2) * (resolution - 2) + 4 * 3 + 4 * (resolution - 2) * 4,
-        );
-        let mut row_indices = Vec::with_capacity(resolution * resolution + 1);
-        // dbg!(row_indices.capacity());
-        row_indices.push(0);
+    fn set_boundary(resolution: usize, boundary_type: u32, grid: &mut [Vec<f32>]) {
+        for i in 1..=resolution {
+            grid[i][0] = if boundary_type == 2 { -1.0 } else { 1.0 } * grid[i][1];
+            grid[i][resolution + 1] =
+                if boundary_type == 2 { -1.0 } else { 1.0 } * grid[i][resolution];
 
-        for i in 0..resolution {
-            for j in 0..resolution {
-                let cell_count = i * resolution + j;
-                let mut neighbors = Vec::new();
-
-                if i > 0 {
-                    neighbors.push((i - 1) * resolution + j);
-                }
-                if i + 1 < resolution {
-                    neighbors.push((i + 1) * resolution + j);
-                }
-                if j > 0 {
-                    neighbors.push(i * resolution + (j - 1));
-                }
-                if j + 1 < resolution {
-                    neighbors.push(i * resolution + (j + 1));
-                }
-
-                neighbors.push(cell_count);
-                neighbors.sort();
-
-                for neighbor in &neighbors {
-                    if *neighbor == cell_count {
-                        values.push(neighbors.len() as f32);
-                    } else {
-                        values.push(1.0_f32);
-                    }
-                    column_indices.push(*neighbor);
-                }
-
-                // values.push(neighbors.len() as f32);
-                // column_indices.push(cell_count);
-                row_indices.push(values.len());
-            }
+            grid[0][i] = if boundary_type == 1 { -1.0 } else { 1.0 } * grid[1][i];
+            grid[resolution + 1][i] =
+                if boundary_type == 1 { -1.0 } else { 1.0 } * grid[resolution][i];
         }
-        // row_indices.push(values.len());
-        // dbg!(row_indices.len());
 
-        CsrMatrix::try_from_csr_data(
-            resolution * resolution,
-            resolution * resolution,
-            row_indices,
-            column_indices,
-            values,
-        )
-        .unwrap()
+        grid[0][0] = 0.5 * (grid[0][1] + grid[1][0]);
+        grid[0][resolution + 1] = 0.5 * (grid[0][resolution] + grid[1][resolution + 1]);
+        grid[resolution + 1][0] = 0.5 * (grid[resolution + 1][1] + grid[resolution][0]);
+        grid[resolution + 1][resolution + 1] =
+            0.5 * (grid[resolution + 1][resolution] + grid[resolution][resolution + 1]);
+    }
+
+    fn linear_system_solver(
+        resolution: usize,
+        boundary_type: u32,
+        grid: &mut [Vec<f32>],
+        grid_0: &[Vec<f32>],
+        coefficient: f32,
+        divisor: f32,
+        num_iters: u32,
+    ) {
+        for _ in 0..num_iters {
+            for i in 1..=resolution {
+                for j in 1..=resolution {
+                    grid[i][j] = (grid_0[i][j]
+                        + coefficient
+                            * (grid[i + 1][j] + grid[i - 1][j] + grid[i][j + 1] + grid[i][j - 1]))
+                        / divisor;
+                }
+            }
+            Self::set_boundary(resolution, boundary_type, grid);
+        }
     }
 
     fn lerp(a: f32, b: f32, k: f32) -> f32 {
         a + k * (b - a)
     }
 
+    fn diffuse(
+        resolution: usize,
+        boundary_type: u32,
+        grid: &mut [Vec<f32>],
+        grid_0: &[Vec<f32>],
+        diffusion_coefficient: f32,
+        num_iters: u32,
+        dt: f32,
+    ) {
+        let coefficient = dt * diffusion_coefficient * resolution as f32 * resolution as f32;
+        Self::linear_system_solver(
+            resolution,
+            boundary_type,
+            grid,
+            grid_0,
+            coefficient,
+            1.0 + 4.0 * coefficient,
+            num_iters,
+        );
+    }
+
     fn advect(
         resolution: usize,
+        boundary_type: u32,
         dt: f32,
-        grid: &mut RingBuffer<Vec<Vec<f32>>>,
+        grid: &mut [Vec<f32>],
+        grid_0: &[Vec<f32>],
         u: &[Vec<f32>],
         v: &[Vec<f32>],
     ) {
         for i in 1..=resolution {
             for j in 1..=resolution {
                 let prev_x = (i as f32 - dt * u[i][j]).clamp(0.5, resolution as f32 + 0.5);
-                let prev_y = (j as f32
-                    - dt * (v[i][j - 1] + v[i][j] + v[i + 1][j - 1] + v[i + 1][j]) / 4.0)
-                    .clamp(0.5, resolution as f32 + 0.5);
+                let prev_y = (j as f32 - dt * v[i][j]).clamp(0.5, resolution as f32 + 0.5);
 
-                let top_left_value = grid[0_i32][prev_x as usize][prev_y as usize];
-                let top_right_value = grid[0_i32][prev_x as usize + 1][prev_y as usize];
+                let top_left_value = grid_0[prev_x as usize][prev_y as usize];
+                let top_right_value = grid_0[prev_x as usize + 1][prev_y as usize];
 
-                let bottom_left_value = grid[0_i32][prev_x as usize + 1][prev_y as usize];
-                let bottom_right_value = grid[0_i32][prev_x as usize + 1][prev_y as usize + 1];
+                let bottom_left_value = grid_0[prev_x as usize + 1][prev_y as usize];
+                let bottom_right_value = grid_0[prev_x as usize + 1][prev_y as usize + 1];
 
                 let top_lerp = Self::lerp(top_left_value, top_right_value, prev_x.fract());
                 let bottom_lerp = Self::lerp(bottom_left_value, bottom_right_value, prev_x.fract());
 
                 let final_value = Self::lerp(top_lerp, bottom_lerp, prev_y.fract());
 
-                grid[1_i32][i][j] = final_value;
+                grid[i][j] = final_value;
             }
         }
+
+        Self::set_boundary(resolution, boundary_type, grid);
     }
 
     fn project(
         resolution: usize,
-        dt: f32,
         u: &mut [Vec<f32>],
         v: &mut [Vec<f32>],
-        pressure_grid: &mut [Vec<f32>],
-        pressure_divergence_mat: &CsrMatrix<f32>,
+        p: &mut [Vec<f32>],
+        div: &mut [Vec<f32>],
+        num_iters: u32,
     ) {
-        let mut divergence_vector = Vec::with_capacity(resolution * resolution); // Vec::with_capacity(resolution * resolution);
+        let cell_size = 1.0 / resolution as f32;
 
         for i in 1..=resolution {
             for j in 1..=resolution {
-                if i == 1 {
-                    if j == 1 {
-                        divergence_vector.push(u[i][j + 1] + v[i + 1][j]);
-                        continue;
-                    }
-                    if j == resolution {
-                        divergence_vector.push(u[i][j] - v[i + 1][j]);
-                        continue;
-                    }
-                    divergence_vector.push(u[i][j + 1] - u[i][j] + v[i + 1][j]);
-                    continue;
-                }
-                if i == resolution {
-                    if j == 1 {
-                        divergence_vector.push(u[i][j + 1] - v[i][j]);
-                        continue;
-                    }
-                    if j == resolution {
-                        divergence_vector.push(u[i][j] + v[i][j]);
-                        continue;
-                    }
-                    divergence_vector.push(u[i][j + 1] - u[i][j] + v[i][j]);
-                    continue;
-                }
-                if j == 1 {
-                    divergence_vector.push(u[i][j + 1] + v[i][j] - v[i + 1][j]);
-                    continue;
-                }
-                if j == resolution {
-                    divergence_vector.push(u[i][j] + v[i][j] - v[i + 1][j]);
-                    continue;
-                }
-
-                divergence_vector.push(u[i][j] - u[i][j + 1] + v[i][j] - v[i + 1][j]);
+                div[i][j] =
+                    -0.5 * cell_size * (u[i + 1][j] - u[i - 1][j] + v[i][j + 1] - v[i][j - 1]);
+                p[i][j] = 0.0;
             }
         }
 
-        let divergence_vector = nalgebra::DVector::from_column_slice(&divergence_vector);
+        Self::set_boundary(resolution, 0, div);
+        Self::set_boundary(resolution, 0, p);
 
-        let mut estimate = nalgebra::DVector::<f32>::zeros(divergence_vector.len());
-
-        let mut residual = divergence_vector.clone();
-
-        let mut direction = residual.clone();
-
-        let mut error_squared_magnitude = residual.magnitude_squared();
-
-        for k in 0..20 {
-            if error_squared_magnitude < 0.01 {
-                break;
-            }
-            let dir_clone = direction.clone();
-
-            let ap = pressure_divergence_mat * &direction;
-            let alpha = error_squared_magnitude / (direction.dot(&ap));
-
-            estimate += alpha * dir_clone;
-            residual -= alpha * ap;
-
-            let new_error_squared_magnitude = residual.magnitude_squared();
-
-            let beta = new_error_squared_magnitude / error_squared_magnitude;
-
-            error_squared_magnitude = new_error_squared_magnitude;
-
-            direction *= beta;
-
-            direction += &residual;
-        }
-
-        for (cell_id, val) in estimate.iter().enumerate() {
-            let i = cell_id / resolution;
-            let j = cell_id % resolution;
-            pressure_grid[i][j] = *val;
-        }
+        Self::linear_system_solver(resolution, 0, p, div, 1.0, 4.0, num_iters);
 
         for i in 1..=resolution {
             for j in 1..=resolution {
-                let cell_id = (i - 1) * resolution + (j - 1);
-                let div = divergence_vector[cell_id];
-
-                if i == 1 {
-                    if j == 1 {
-                        u[i][j + 1] -= div / 2.0;
-                        v[i + 1][j] -= div / 2.0;
-                        continue;
-                    }
-
-                    if j == resolution {
-                        u[i][j] += div / 2.0;
-                        v[i + 1][j] -= div / 2.0;
-                        continue;
-                    }
-
-                    u[i][j] += div / 3.0;
-                    u[i][j + 1] -= div / 3.0;
-                    v[i + 1][j] -= div / 3.0;
-                    continue;
-                }
-                if i == resolution {
-                    if j == 1 {
-                        u[i][j + 1] -= div / 2.0;
-                        v[i][j] += div / 2.0;
-                        continue;
-                    }
-                    if j == resolution {
-                        u[i][j] += div / 2.0;
-                        v[i][j] += div / 2.0;
-                        continue;
-                    }
-
-                    u[i][j] += div / 3.0;
-                    u[i][j + 1] -= div / 3.0;
-                    v[i][j] += div / 3.0;
-                    continue;
-                }
-                if j == 1 {
-                    u[i][j + 1] -= div / 3.0;
-                    v[i][j] += div / 3.0;
-                    v[i + 1][j] -= div / 3.0;
-                    continue;
-                }
-                if j == resolution {
-                    u[i][j] += div / 3.0;
-                    v[i][j] += div / 3.0;
-                    v[i + 1][j] -= div / 3.0;
-                    continue;
-                }
-
-                u[i][j] += div / 4.0;
-                u[i][j + 1] -= div / 4.0;
-                v[i][j] += div / 4.0;
-                v[i + 1][j] -= div / 4.0;
+                u[i][j] -= 0.5 * (p[i + 1][j] - p[i - 1][j]) / cell_size;
+                v[i][j] -= 0.5 * (p[i][j + 1] - p[i][j - 1]) / cell_size;
             }
         }
+
+        Self::set_boundary(resolution, 1, u);
+        Self::set_boundary(resolution, 2, v);
     }
 
-    fn simulate(&mut self, dt: f32) {
+    fn simulate(&mut self, dt: f32, num_iters: u32) {
+        let grid_u = self.grid_u.clone();
+        Self::diffuse(
+            self.resolution,
+            1,
+            &mut self.grid_u_0,
+            &grid_u,
+            self.viscosity,
+            num_iters,
+            dt,
+        );
+        let grid_v = self.grid_v.clone();
+        Self::diffuse(
+            self.resolution,
+            2,
+            &mut self.grid_v_0,
+            &grid_v,
+            self.viscosity,
+            num_iters,
+            dt,
+        );
+
         Self::project(
             self.resolution,
-            dt,
-            &mut self.grid_u[0_i32],
-            &mut self.grid_v[0_i32],
-            &mut self.pressure_grid,
-            &self.pressure_divergence_mat,
+            &mut self.grid_u_0,
+            &mut self.grid_v_0,
+            &mut self.grid_u,
+            &mut self.grid_v,
+            num_iters,
         );
 
-        let mut grid_u = self.grid_u.clone();
+        let grid_u_0 = self.grid_u_0.clone();
         Self::advect(
             self.resolution,
+            1,
             dt,
-            &mut grid_u,
-            &self.grid_u[0_i32],
-            &self.grid_v[0_i32],
+            &mut self.grid_u,
+            &grid_u_0,
+            &self.grid_u_0,
+            &self.grid_v_0,
         );
-        self.grid_u = grid_u;
 
-        let mut grid_v = self.grid_v.clone();
+        let grid_v_0 = self.grid_v_0.clone();
         Self::advect(
             self.resolution,
+            2,
             dt,
-            &mut grid_v,
-            &self.grid_u[0_i32],
-            &self.grid_v[0_i32],
+            &mut self.grid_v,
+            &grid_v_0,
+            &self.grid_u_0,
+            &self.grid_v_0,
         );
-        self.grid_v = grid_v;
 
-        self.grid_u.rotate_left(1);
-        self.grid_v.rotate_left(1);
+        Self::project(
+            self.resolution,
+            &mut self.grid_u,
+            &mut self.grid_v,
+            &mut self.grid_u_0,
+            &mut self.grid_v_0,
+            num_iters,
+        );
+
+        Self::diffuse(
+            self.resolution,
+            0,
+            &mut self.scratchpad,
+            &self.density_grid,
+            self.diffusion_coefficient,
+            num_iters,
+            dt,
+        );
+        Self::advect(
+            self.resolution,
+            0,
+            dt,
+            &mut self.density_grid,
+            &self.scratchpad,
+            &self.grid_u,
+            &self.grid_v,
+        );
     }
-
-    /* fn velocity_grid(&self) -> [[f32; 128]; 128] {
-        (1..=self.resolution)
-            .map(|i| {
-                let new_row: [f32; 128] = (1..=self.resolution)
-                    .map(|j| {
-                        Vector2::new(self.grid_u[0_i32][i][j], self.grid_v[0_i32][i][j]).magnitude()
-                    })
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap();
-                new_row
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-
-    fn pressure_grid(&self) -> [[f32; 128]; 128] {
-        self.pressure_grid
-            .iter()
-            .map(|row| {
-                let new_row: [f32; 128] = row.to_vec().try_into().unwrap();
-                new_row
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    } */
 }
 
 impl ComponentSystem for SimulatorComponent {
-    fn initialize(
+    fn register_component(
         &mut self,
-        _device: Arc<Device>,
-        _queue: Arc<Queue>,
-        _component_map: &AllComponents,
-        _concept_manager: Rc<Mutex<ConceptManager>>,
-        _engine_details: Option<Rc<Mutex<EngineDetails>>>,
-        _engine_systems: Option<Rc<Mutex<EngineSystems>>>,
-        _ui_manager: Rc<Mutex<gamezap::ui_manager::UiManager>>,
+        concept_manager: Rc<Mutex<ConceptManager>>,
+        data: HashMap<String, Box<dyn Any>>,
     ) {
-        for i in 50..60 {
-            for j in 50..60 {
-                // self.density_grid[i][j] = 1.0;
-                self.grid_u[0_i32][i][j] = 1.0;
-                self.grid_v[0_i32][i][j] = 0.5;
-            }
-        }
-
-        // self.add_forces(forces, dt)
+        concept_manager
+            .lock()
+            .unwrap()
+            .register_component_concepts(self.id, data);
     }
 
     fn update(
@@ -398,35 +292,87 @@ impl ComponentSystem for SimulatorComponent {
         _component_map: &mut AllComponents,
         engine_details: Rc<Mutex<EngineDetails>>,
         _engine_systems: Rc<Mutex<EngineSystems>>,
-        _concept_manager: Rc<Mutex<ConceptManager>>,
+        concept_manager: Rc<Mutex<ConceptManager>>,
         _active_camera_id: Option<EntityId>,
         _entities: &mut Vec<Entity>,
         materials: Option<&mut (Vec<Material>, usize)>,
         _compute_pipelines: &[ComputePipeline],
     ) {
         let details = engine_details.lock().unwrap();
-        let dt = details.last_frame_duration.as_secs_f32() * 5.0;
+        let dt = details.last_frame_duration.as_secs_f32() * 10.0;
 
-        /* for i in 2..=self.resolution {
-            for j in 2..=self.resolution {
-                self.grid_v[0_i32][i][j] = 1.0;
+        let mut concept_manager = concept_manager.lock().unwrap();
+
+        {
+            let forces_x = concept_manager
+                .get_concept::<Vec<Vec<f32>>>(self.id, "forces_x".to_string())
+                .unwrap();
+
+            let forces_y = concept_manager
+                .get_concept::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
+                .unwrap();
+
+            let added_densities = concept_manager
+                .get_concept::<Vec<Vec<f32>>>(self.id, "added_densities".to_string())
+                .unwrap();
+
+            for i in 0..self.resolution {
+                for j in 0..self.resolution {
+                    self.grid_u[i + 1][j + 1] += forces_x[i][j] * dt;
+                    self.grid_v[i + 1][j + 1] += forces_y[i][j] * dt;
+
+                    self.density_grid[i + 1][j + 1] += added_densities[i][j];
+                }
             }
-        } */
-        self.simulate(dt);
-        // println!("frame");
+        }
+
+        let added_densities = concept_manager
+            .get_concept_mut::<Vec<Vec<f32>>>(self.id, "added_densities".to_string())
+            .unwrap();
+
+        *added_densities = vec![vec![0.0; self.resolution]; self.resolution];
+
+        let forces_x = concept_manager
+            .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_x".to_string())
+            .unwrap();
+
+        *forces_x = vec![vec![0.0; self.resolution]; self.resolution];
+
+        let forces_y = concept_manager
+            .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
+            .unwrap();
+        *forces_y = vec![vec![0.0; self.resolution]; self.resolution];
+
+        self.simulate(dt, 5);
 
         let rgba =
             image::RgbaImage::from_fn(self.resolution as u32, self.resolution as u32, |x, y| {
-                image::Rgba(
-                    [Self::lerp(0.0, 255.0, self.pressure_grid[y as usize][x as usize]) as u8; 4],
-                )
+                let rgba = vec![
+                    Self::lerp(
+                        0.0,
+                        255.0,
+                        self.density_grid[y as usize + 1][x as usize + 1],
+                    ) as u8,
+                    Self::lerp(
+                        0.0,
+                        255.0,
+                        self.density_grid[y as usize + 1][x as usize + 1],
+                    ) as u8,
+                    Self::lerp(
+                        0.0,
+                        255.0,
+                        self.density_grid[y as usize + 1][x as usize + 1],
+                    ) as u8,
+                    255,
+                ];
+                image::Rgba(rgba.try_into().unwrap())
             });
 
         let tex = gamezap::texture::Texture::from_rgba(
             &device,
             &queue,
             &rgba,
-            Some("Pressure texture"),
+            Some("Density texture"),
             false,
             false,
         )
@@ -434,13 +380,107 @@ impl ComponentSystem for SimulatorComponent {
 
         let materials = materials.unwrap();
         materials.0[0].update_textures(device, vec![&tex]);
+    }
 
-        /* let selected_material = &mut materials.0[materials.1];
-        if let Some((_, buffer)) = &selected_material.uniform_buffer_bind_group() {
-            let grid_2 = self.pressure_grid();
-            // println!("{:?}", &grid_2[50][50]);
-            let bytes: [u8; 4 * 128 * 128] = zerocopy::transmute!(grid_2);
-            queue.write_buffer(buffer, 0, &bytes);
-        } */
+    fn on_event(
+        &self,
+        event: &sdl2::event::Event,
+        _component_map: &HashMap<EntityId, Vec<gamezap::ecs::component::Component>>,
+        concept_manager: Rc<Mutex<ConceptManager>>,
+        _active_camera_id: Option<EntityId>,
+        engine_details: &EngineDetails,
+        _engine_systems: &EngineSystems,
+    ) {
+        let scale = 3;
+        let brush_size = 20_i32;
+        let vel_mul = -10.0;
+        let dens_mul = 5.0;
+
+        if let sdl2::event::Event::MouseMotion {
+            mousestate, x, y, ..
+        } = event
+        {
+            let mut concept_manager = concept_manager.lock().unwrap();
+            {
+                let mouse_positions = concept_manager
+                    .get_concept_mut::<RingBuffer<(i32, i32)>>(
+                        self.id,
+                        "mouse_positions".to_string(),
+                    )
+                    .unwrap();
+
+                mouse_positions[-1] = (*x, *y);
+                mouse_positions.rotate_left(1);
+            }
+
+            if mousestate.left() {
+                let mouse_positions = concept_manager
+                    .get_concept::<RingBuffer<(i32, i32)>>(self.id, "mouse_positions".to_string())
+                    .unwrap()
+                    .clone();
+                let forces_x = concept_manager
+                    .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_x".to_string())
+                    .unwrap();
+                for i in 0..brush_size * 2 {
+                    for j in 0..brush_size * 2 {
+                        let i = i - brush_size;
+                        let j = j - brush_size;
+                        if ((i * i + j * j) as f32).sqrt() < brush_size as f32 {
+                            let diff = (x - mouse_positions[0_i32].0) as f32;
+                            let vel = diff
+                                / (20.0 * engine_details.last_frame_duration.as_millis() as f32);
+
+                            forces_x[((*y / scale + i) as usize).clamp(0, self.resolution - 1)]
+                                [((*x / scale + j) as usize).clamp(0, self.resolution - 1)] =
+                                vel * vel_mul;
+                        }
+                    }
+                }
+                let forces_y = concept_manager
+                    .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
+                    .unwrap();
+
+                for i in 0..brush_size * 2 {
+                    for j in 0..brush_size * 2 {
+                        let i = i - brush_size;
+                        let j = j - brush_size;
+                        if ((i * i + j * j) as f32).sqrt() < brush_size as f32 {
+                            let diff = (y - mouse_positions[0_i32].1) as f32;
+                            let vel = diff
+                                / (20.0 * engine_details.last_frame_duration.as_millis() as f32);
+
+                            forces_y[((*y / scale + i) as usize).clamp(0, self.resolution - 1)]
+                                [((*x / scale + j) as usize).clamp(0, self.resolution - 1)] =
+                                vel * vel_mul;
+                        }
+                    }
+                }
+            }
+
+            if mousestate.right() {
+                let scancodes = &engine_details.pressed_scancodes;
+                let added_densities = concept_manager
+                    .get_concept_mut::<Vec<Vec<f32>>>(self.id, "added_densities".to_string())
+                    .unwrap();
+
+                for i in 0..brush_size * 2 {
+                    for j in 0..brush_size * 2 {
+                        let i = i - brush_size;
+                        let j = j - brush_size;
+                        if ((i * i + j * j) as f32).sqrt() < brush_size as f32 {
+                            added_densities
+                                [((*y / scale + i) as usize).clamp(0, self.resolution - 1)]
+                                [((*x / scale + j) as usize).clamp(0, self.resolution - 1)] +=
+                                dens_mul
+                                    * if scancodes.contains(&sdl2::keyboard::Scancode::LShift) {
+                                        -2.0
+                                    } else {
+                                        2.0
+                                    };
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -1,3 +1,4 @@
+use fps_component::FpsComponent;
 use gamezap::{
     ecs::{components::mesh_component::MeshComponent, material::Material, scene::Scene},
     model::Vertex,
@@ -5,6 +6,7 @@ use gamezap::{
 };
 use simulator_component::SimulatorComponent;
 
+pub mod fps_component;
 pub mod simulator_component;
 
 #[tokio::main]
@@ -13,7 +15,7 @@ async fn main() {
     let video_subsystem = sdl_context.video().unwrap();
     let event_pump = sdl_context.event_pump().unwrap();
     let application_title = "Floosh";
-    let window_size = (512, 512);
+    let window_size = (128 * 6, 128 * 6);
     let window = video_subsystem
         .window(application_title, window_size.0, window_size.1)
         .resizable()
@@ -44,29 +46,31 @@ async fn main() {
 
     let concept_manager = scene.get_concept_manager();
 
-    let simulator_component = SimulatorComponent::new(512, 1.0);
+    let sim_res = 256;
+    let simulator_component =
+        SimulatorComponent::new(concept_manager.clone(), sim_res, 0.0, 0.00001);
 
     let canvas_mesh = MeshComponent::new(
         concept_manager,
         vec![
             Vertex {
                 position: [-1.0, 1.0, 0.0],
-                tex_coords: [0.0, 1.0],
-                normal: [0.0, 0.0, -1.0],
-            },
-            Vertex {
-                position: [-1.0, -1.0, 0.0],
                 tex_coords: [0.0, 0.0],
                 normal: [0.0, 0.0, -1.0],
             },
             Vertex {
+                position: [-1.0, -1.0, 0.0],
+                tex_coords: [0.0, 1.0],
+                normal: [0.0, 0.0, -1.0],
+            },
+            Vertex {
                 position: [1.0, -1.0, 0.0],
-                tex_coords: [1.0, 0.0],
+                tex_coords: [1.0, 1.0],
                 normal: [0.0, 0.0, -1.0],
             },
             Vertex {
                 position: [1.0, 1.0, 0.0],
-                tex_coords: [1.0, 1.0],
+                tex_coords: [1.0, 0.0],
                 normal: [0.0, 0.0, -1.0],
             },
         ],
@@ -81,11 +85,12 @@ async fn main() {
         vec![gamezap::texture::Texture::blank_texture(
             &device.clone(),
             &queue,
-            256,
-            256,
+            sim_res as u32,
+            sim_res as u32,
             Some("test tex"),
             true,
-        ).unwrap()],
+        )
+        .unwrap()],
         // Some(&bytes),
         None,
         // Some(bytemuck::cast_slice(&[data])),
@@ -99,6 +104,10 @@ async fn main() {
         vec![Box::new(simulator_component), Box::new(canvas_mesh)],
         Some((vec![simulator_material], 0)),
     );
+
+    let fps_component = FpsComponent::default();
+
+    let _fps_display = scene.create_entity(0, true, vec![Box::new(fps_component)], None);
 
     engine.create_scene(scene);
 
