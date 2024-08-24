@@ -3,6 +3,7 @@ use gamezap::new_component;
 
 new_component!(SimulatorComponent {
     resolution: usize,
+    compute_index: usize,
     diffusion_coefficient: f32,
     viscosity: f32,
     grid_u: Vec<Vec<f32>>,
@@ -16,6 +17,7 @@ new_component!(SimulatorComponent {
 impl SimulatorComponent {
     pub fn new(
         concept_manager: Rc<Mutex<ConceptManager>>,
+        compute_index: usize,
         resolution: usize,
         diffusion_coefficient: f32,
         viscosity: f32,
@@ -24,6 +26,7 @@ impl SimulatorComponent {
 
         let mut component = SimulatorComponent {
             resolution,
+            compute_index,
             diffusion_coefficient,
             viscosity,
             grid_u: zeroes.clone(),
@@ -135,14 +138,14 @@ impl SimulatorComponent {
     ) {
         for i in 1..=resolution {
             for j in 1..=resolution {
-                let prev_x = (i as f32 - dt * u[i][j]).clamp(0.5, resolution as f32 + 0.5);
-                let prev_y = (j as f32 - dt * v[i][j]).clamp(0.5, resolution as f32 + 0.5);
+                let prev_x = (j as f32 - dt * u[i][j]).clamp(0.5, resolution as f32 + 0.5);
+                let prev_y = (i as f32 - dt * v[i][j]).clamp(0.5, resolution as f32 + 0.5);
 
-                let top_left_value = grid_0[prev_x as usize][prev_y as usize];
-                let top_right_value = grid_0[prev_x as usize + 1][prev_y as usize];
+                let top_left_value = grid_0[prev_y as usize][prev_x as usize];
+                let top_right_value = grid_0[prev_y as usize][prev_x as usize + 1];
 
-                let bottom_left_value = grid_0[prev_x as usize + 1][prev_y as usize];
-                let bottom_right_value = grid_0[prev_x as usize + 1][prev_y as usize + 1];
+                let bottom_left_value = grid_0[prev_y as usize + 1][prev_x as usize];
+                let bottom_right_value = grid_0[prev_y as usize + 1][prev_x as usize + 1];
 
                 let top_lerp = Self::lerp(top_left_value, top_right_value, prev_x.fract());
                 let bottom_lerp = Self::lerp(bottom_left_value, bottom_right_value, prev_x.fract());
@@ -296,14 +299,14 @@ impl ComponentSystem for SimulatorComponent {
         _active_camera_id: Option<EntityId>,
         _entities: &mut Vec<Entity>,
         materials: Option<&mut (Vec<Material>, usize)>,
-        _compute_pipelines: &[ComputePipeline],
+        compute_pipelines: &mut [ComputePipeline],
     ) {
         let details = engine_details.lock().unwrap();
         let dt = details.last_frame_duration.as_secs_f32() * 10.0;
 
         let mut concept_manager = concept_manager.lock().unwrap();
 
-        {
+        let added_rgba = {
             let forces_x = concept_manager
                 .get_concept::<Vec<Vec<f32>>>(self.id, "forces_x".to_string())
                 .unwrap();
@@ -324,9 +327,35 @@ impl ComponentSystem for SimulatorComponent {
                     self.density_grid[i + 1][j + 1] += added_densities[i][j];
                 }
             }
-        }
 
-        let added_densities = concept_manager
+            image::RgbaImage::from_fn(
+                self.resolution as u32 + 2,
+                self.resolution as u32 + 2,
+                |x, y| {
+                    let rgba = if x > 0
+                        && x < self.resolution as u32 + 1
+                        && y > 0
+                        && y < self.resolution as u32 + 1
+                    {
+                        let x_vel =
+                            Self::lerp(0.0, 255.0, forces_x[y as usize - 1][x as usize - 1]) as u8;
+                        let y_vel =
+                            Self::lerp(0.0, 255.0, forces_y[y as usize - 1][x as usize - 1]) as u8;
+
+                        let dens =
+                            Self::lerp(0.0, 255.0, added_densities[y as usize - 1][x as usize - 1])
+                                as u8;
+
+                        [x_vel, y_vel, dens, 1]
+                    } else {
+                        [0; 4]
+                    };
+                    image::Rgba(rgba)
+                },
+            )
+        };
+
+        /* let added_densities = concept_manager
             .get_concept_mut::<Vec<Vec<f32>>>(self.id, "added_densities".to_string())
             .unwrap();
 
@@ -341,45 +370,49 @@ impl ComponentSystem for SimulatorComponent {
         let forces_y = concept_manager
             .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
             .unwrap();
-        *forces_y = vec![vec![0.0; self.resolution]; self.resolution];
+        *forces_y = vec![vec![0.0; self.resolution]; self.resolution]; */
 
-        self.simulate(dt, 5);
+        // self.simulate(dt, 5);
 
-        let rgba =
-            image::RgbaImage::from_fn(self.resolution as u32, self.resolution as u32, |x, y| {
-                let rgba = vec![
-                    Self::lerp(
-                        0.0,
-                        255.0,
-                        self.density_grid[y as usize + 1][x as usize + 1],
-                    ) as u8,
-                    Self::lerp(
-                        0.0,
-                        255.0,
-                        self.density_grid[y as usize + 1][x as usize + 1],
-                    ) as u8,
-                    Self::lerp(
-                        0.0,
-                        255.0,
-                        self.density_grid[y as usize + 1][x as usize + 1],
-                    ) as u8,
-                    255,
-                ];
-                image::Rgba(rgba.try_into().unwrap())
-            });
+        /* let rgba =
+        image::RgbaImage::from_fn(self.resolution as u32, self.resolution as u32, |x, y| {
+            let rgba = vec![
+                Self::lerp(
+                    0.0,
+                    255.0,
+                    self.density_grid[y as usize + 1][x as usize + 1],
+                ) as u8,
+                Self::lerp(
+                    0.0,
+                    255.0,
+                    self.density_grid[y as usize + 1][x as usize + 1],
+                ) as u8,
+                Self::lerp(
+                    0.0,
+                    255.0,
+                    self.density_grid[y as usize + 1][x as usize + 1],
+                ) as u8,
+                255,
+            ];
+            image::Rgba(rgba.try_into().unwrap())
+        }); */
 
-        let tex = gamezap::texture::Texture::from_rgba(
-            &device,
-            &queue,
-            &rgba,
-            Some("Density texture"),
-            false,
-            false,
-        )
-        .unwrap();
+        let added_tex = Rc::new(
+            gamezap::texture::Texture::from_rgba(
+                &device,
+                &queue,
+                &added_rgba,
+                Some("Added data texture"),
+                true,
+                true,
+            )
+            .unwrap(),
+        );
 
+        compute_pipelines[self.compute_index].update_pipeline_assets(device.clone(), vec![(gamezap::compute::ComputePackagedData::Texture(added_tex.clone()), 2)]);
         let materials = materials.unwrap();
-        materials.0[0].update_textures(device, vec![&tex]);
+        materials.0[0].update_textures(device, &[(compute_pipelines[self.compute_index].pipeline_assets[3].as_texture().unwrap().clone(), 0)]);
+        // materials.0[0].update_textures(device, &[(added_tex, 0)]);
     }
 
     fn on_event(
@@ -393,8 +426,9 @@ impl ComponentSystem for SimulatorComponent {
     ) {
         let scale = 3;
         let brush_size = 20_i32;
-        let vel_mul = -10.0;
-        let dens_mul = 5.0;
+        let vel_mul = 10.0;
+        let dens_mul = 2.0;
+        let fall_off = 3.0;
 
         if let sdl2::event::Event::MouseMotion {
             mousestate, x, y, ..
@@ -425,14 +459,20 @@ impl ComponentSystem for SimulatorComponent {
                     for j in 0..brush_size * 2 {
                         let i = i - brush_size;
                         let j = j - brush_size;
-                        if ((i * i + j * j) as f32).sqrt() < brush_size as f32 {
+
+                        let recalculated_y =
+                            (*y / scale + i).clamp(0, self.resolution as i32 - 1) as usize;
+                        let recalculated_x =
+                            (*x / scale + j).clamp(0, self.resolution as i32 - 1) as usize;
+
+                        let dist = ((i * i + j * j) as f32).sqrt();
+                        if dist < brush_size as f32 {
                             let diff = (x - mouse_positions[0_i32].0) as f32;
                             let vel = diff
-                                / (20.0 * engine_details.last_frame_duration.as_millis() as f32);
+                                / (20.0/* * engine_details.last_frame_duration.as_millis() as f32 */);
 
-                            forces_x[((*y / scale + i) as usize).clamp(0, self.resolution - 1)]
-                                [((*x / scale + j) as usize).clamp(0, self.resolution - 1)] =
-                                vel * vel_mul;
+                            forces_x[recalculated_y][recalculated_x] =
+                                vel * vel_mul * (-1.0 * brush_size as f32 - dist);
                         }
                     }
                 }
@@ -442,19 +482,28 @@ impl ComponentSystem for SimulatorComponent {
 
                 for i in 0..brush_size * 2 {
                     for j in 0..brush_size * 2 {
+                        let recalculated_y =
+                            (*y / scale + i).clamp(0, self.resolution as i32 - 1) as usize;
+                        let recalculated_x =
+                            (*x / scale + j).clamp(0, self.resolution as i32 - 1) as usize;
+
                         let i = i - brush_size;
                         let j = j - brush_size;
-                        if ((i * i + j * j) as f32).sqrt() < brush_size as f32 {
+                        let dist = ((i * i + j * j) as f32).sqrt();
+                        if dist < brush_size as f32 {
                             let diff = (y - mouse_positions[0_i32].1) as f32;
                             let vel = diff
-                                / (20.0 * engine_details.last_frame_duration.as_millis() as f32);
+                                / (20.0/* * engine_details.last_frame_duration.as_millis() as f32 */);
 
-                            forces_y[((*y / scale + i) as usize).clamp(0, self.resolution - 1)]
-                                [((*x / scale + j) as usize).clamp(0, self.resolution - 1)] =
-                                vel * vel_mul;
+                            forces_y[recalculated_y][recalculated_x] = vel * vel_mul * dist;
                         }
                     }
                 }
+                /* println!(
+                    "{}, {}",
+                    (x - mouse_positions[0_i32].0) as f32 / (20.0 * engine_details.last_frame_duration.as_millis() as f32),
+                    (y - mouse_positions[0_i32].1) as f32 / (20.0 * engine_details.last_frame_duration.as_millis() as f32),
+                ); */
             }
 
             if mousestate.right() {

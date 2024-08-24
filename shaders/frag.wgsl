@@ -13,7 +13,7 @@ var texture_sampler: sampler;
 
 @fragment
 fn main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(texture, texture_sampler, in.tex_coords);
+    return textureSample(texture, texture_sampler, in.tex_coords );
 
     /* let x_coord = u32(floor(in.tex_coords.x * 128.0));
     let y_coord = u32(floor(in.tex_coords.y * 128.0));

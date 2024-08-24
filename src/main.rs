@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use fps_component::FpsComponent;
 use gamezap::{
     ecs::{components::mesh_component::MeshComponent, material::Material, scene::Scene},
@@ -15,7 +17,7 @@ async fn main() {
     let video_subsystem = sdl_context.video().unwrap();
     let event_pump = sdl_context.event_pump().unwrap();
     let application_title = "Floosh";
-    let window_size = (128 * 6, 128 * 6);
+    let window_size = (256 * 3, 256 * 3);
     let window = video_subsystem
         .window(application_title, window_size.0, window_size.1)
         .resizable()
@@ -47,8 +49,53 @@ async fn main() {
     let concept_manager = scene.get_concept_manager();
 
     let sim_res = 256;
-    let simulator_component =
-        SimulatorComponent::new(concept_manager.clone(), sim_res, 0.0, 0.00001);
+
+    let simulation_pipeline_index = scene
+        .create_compute_pipeline(
+            device.clone(),
+            queue.clone(),
+            "shaders/compute.wgsl",
+            (sim_res as u32, sim_res as u32, 1),
+            gamezap::compute::ComputePipelineType::<f32> {
+                input_data: vec![
+                    gamezap::compute::ComputeData::TextureData((
+                        gamezap::compute::ComputeTextureData::Dimensions((
+                            sim_res as u32 + 2,
+                            sim_res as u32 + 2,
+                        )),
+                        true,
+                    )),
+                    gamezap::compute::ComputeData::TextureData((
+                        gamezap::compute::ComputeTextureData::Dimensions((
+                            sim_res as u32 + 2,
+                            sim_res as u32 + 2,
+                        )),
+                        true,
+                    )),
+                    gamezap::compute::ComputeData::TextureData((
+                        gamezap::compute::ComputeTextureData::Dimensions((
+                            sim_res as u32 + 2,
+                            sim_res as u32 + 2,
+                        )),
+                        true,
+                    )),
+                ],
+                output_data_type: vec![gamezap::compute::ComputeOutput::Texture((
+                    sim_res as u32,
+                    sim_res as u32,
+                ))],
+            },
+        )
+        .unwrap();
+
+    let simulator_component = SimulatorComponent::new(
+        concept_manager.clone(),
+        simulation_pipeline_index,
+        sim_res,
+        0.0000,
+        // 1.0,
+        0.00001,
+    );
 
     let canvas_mesh = MeshComponent::new(
         concept_manager,
@@ -82,20 +129,35 @@ async fn main() {
     let simulator_material = Material::new(
         "shaders/vert.wgsl",
         "shaders/frag.wgsl",
-        vec![gamezap::texture::Texture::blank_texture(
-            &device.clone(),
-            &queue,
-            sim_res as u32,
-            sim_res as u32,
-            Some("test tex"),
-            true,
-        )
-        .unwrap()],
+        vec![
+            Rc::new(
+                gamezap::texture::Texture::blank_texture(
+                    &device.clone(),
+                    &queue.clone(),
+                    sim_res as u32 + 2,
+                    sim_res as u32 + 2,
+                    Some("dens tex"),
+                    true,
+                )
+                .unwrap(),
+            ),
+            Rc::new(
+                gamezap::texture::Texture::blank_texture(
+                    &device.clone(),
+                    &queue.clone(),
+                    sim_res as u32 + 2,
+                    sim_res as u32 + 2,
+                    Some("dens tex 2"),
+                    true,
+                )
+                .unwrap(),
+            ),
+        ],
         // Some(&bytes),
         None,
         // Some(bytemuck::cast_slice(&[data])),
         true,
-        device,
+        device.clone(),
     );
 
     let _simulation = scene.create_entity(
