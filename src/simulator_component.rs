@@ -53,8 +53,8 @@ impl SimulatorComponent {
             Box::new(vec![vec![0.0_f32; resolution]; resolution]),
         );
         concepts.insert(
-            "mouse_positions".to_string(),
-            Box::new(RingBuffer::new(vec![(0_i32, 0); 20])),
+            "last_mouse_info".to_string(),
+            Box::new(((0, 0), std::time::Instant::now())),
         );
 
         component.register_component(concept_manager, concepts);
@@ -409,9 +409,24 @@ impl ComponentSystem for SimulatorComponent {
             .unwrap(),
         );
 
-        compute_pipelines[self.compute_index].update_pipeline_assets(device.clone(), vec![(gamezap::compute::ComputePackagedData::Texture(added_tex.clone()), 2)]);
+        compute_pipelines[self.compute_index].update_pipeline_assets(
+            device.clone(),
+            vec![(
+                gamezap::compute::ComputePackagedData::Texture(added_tex.clone()),
+                2,
+            )],
+        );
         let materials = materials.unwrap();
-        materials.0[0].update_textures(device, &[(compute_pipelines[self.compute_index].pipeline_assets[3].as_texture().unwrap().clone(), 0)]);
+        materials.0[0].update_textures(
+            device,
+            &[(
+                compute_pipelines[self.compute_index].pipeline_assets[3]
+                    .as_texture()
+                    .unwrap()
+                    .clone(),
+                0,
+            )],
+        );
         // materials.0[0].update_textures(device, &[(added_tex, 0)]);
     }
 
@@ -426,7 +441,7 @@ impl ComponentSystem for SimulatorComponent {
     ) {
         let scale = 3;
         let brush_size = 20_i32;
-        let vel_mul = 10.0;
+        let vel_mul = 20.0;
         let dens_mul = 2.0;
         let fall_off = 3.0;
 
@@ -435,23 +450,24 @@ impl ComponentSystem for SimulatorComponent {
         } = event
         {
             let mut concept_manager = concept_manager.lock().unwrap();
-            {
-                let mouse_positions = concept_manager
-                    .get_concept_mut::<RingBuffer<(i32, i32)>>(
-                        self.id,
-                        "mouse_positions".to_string(),
-                    )
-                    .unwrap();
-
-                mouse_positions[-1] = (*x, *y);
-                mouse_positions.rotate_left(1);
-            }
 
             if mousestate.left() {
-                let mouse_positions = concept_manager
-                    .get_concept::<RingBuffer<(i32, i32)>>(self.id, "mouse_positions".to_string())
-                    .unwrap()
-                    .clone();
+                let ((last_x, last_y), last_instant) = *concept_manager
+                    .get_concept::<((i32, i32), std::time::Instant)>(
+                        self.id,
+                        "last_mouse_info".to_string(),
+                    )
+                    .unwrap();
+                if (std::time::Instant::now() - last_instant)
+                    >= std::time::Duration::from_millis(10)
+                {
+                    *concept_manager
+                        .get_concept_mut::<((i32, i32), std::time::Instant)>(
+                            self.id,
+                            "last_mouse_info".to_string(),
+                        )
+                        .unwrap() = ((*x, *y), std::time::Instant::now());
+                }
                 let forces_x = concept_manager
                     .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_x".to_string())
                     .unwrap();
@@ -467,7 +483,7 @@ impl ComponentSystem for SimulatorComponent {
 
                         let dist = ((i * i + j * j) as f32).sqrt();
                         if dist < brush_size as f32 {
-                            let diff = (x - mouse_positions[0_i32].0) as f32;
+                            let diff = (x - last_x) as f32;
                             let vel = diff
                                 / (20.0/* * engine_details.last_frame_duration.as_millis() as f32 */);
 
@@ -491,7 +507,7 @@ impl ComponentSystem for SimulatorComponent {
                         let j = j - brush_size;
                         let dist = ((i * i + j * j) as f32).sqrt();
                         if dist < brush_size as f32 {
-                            let diff = (y - mouse_positions[0_i32].1) as f32;
+                            let diff = (y - last_y) as f32;
                             let vel = diff
                                 / (20.0/* * engine_details.last_frame_duration.as_millis() as f32 */);
 
@@ -499,11 +515,6 @@ impl ComponentSystem for SimulatorComponent {
                         }
                     }
                 }
-                /* println!(
-                    "{}, {}",
-                    (x - mouse_positions[0_i32].0) as f32 / (20.0 * engine_details.last_frame_duration.as_millis() as f32),
-                    (y - mouse_positions[0_i32].1) as f32 / (20.0 * engine_details.last_frame_duration.as_millis() as f32),
-                ); */
             }
 
             if mousestate.right() {
