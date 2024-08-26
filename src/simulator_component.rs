@@ -41,12 +41,8 @@ impl SimulatorComponent {
 
         let mut concepts: HashMap<String, Box<dyn Any>> = HashMap::new();
         concepts.insert(
-            "forces_x".to_string(),
-            Box::new(vec![vec![0.0_f32; resolution]; resolution]),
-        );
-        concepts.insert(
-            "forces_y".to_string(),
-            Box::new(vec![vec![0.0_f32; resolution]; resolution]),
+            "forces".to_string(),
+            Box::new(vec![vec![nalgebra::Vector2::<f32>::zeros(); resolution]; resolution]),
         );
         concepts.insert(
             "added_densities".to_string(),
@@ -307,12 +303,8 @@ impl ComponentSystem for SimulatorComponent {
         let mut concept_manager = concept_manager.lock().unwrap();
 
         let added_rgba = {
-            let forces_x = concept_manager
-                .get_concept::<Vec<Vec<f32>>>(self.id, "forces_x".to_string())
-                .unwrap();
-
-            let forces_y = concept_manager
-                .get_concept::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
+            let forces = concept_manager
+                .get_concept::<Vec<Vec<nalgebra::Vector2<f32>>>>(self.id, "forces".to_string())
                 .unwrap();
 
             let added_densities = concept_manager
@@ -321,8 +313,8 @@ impl ComponentSystem for SimulatorComponent {
 
             for i in 0..self.resolution {
                 for j in 0..self.resolution {
-                    self.grid_u[i + 1][j + 1] += forces_x[i][j] * dt;
-                    self.grid_v[i + 1][j + 1] += forces_y[i][j] * dt;
+                    self.grid_u[i + 1][j + 1] += forces[i][j].x * dt;
+                    self.grid_v[i + 1][j + 1] += forces[i][j].y * dt;
 
                     self.density_grid[i + 1][j + 1] += added_densities[i][j];
                 }
@@ -338,9 +330,9 @@ impl ComponentSystem for SimulatorComponent {
                         && y < self.resolution as u32 + 1
                     {
                         let x_vel =
-                            Self::lerp(0.0, 255.0, forces_x[y as usize - 1][x as usize - 1]) as u8;
+                            Self::lerp(0.0, 255.0, forces[y as usize - 1][x as usize - 1].x) as u8;
                         let y_vel =
-                            Self::lerp(0.0, 255.0, forces_y[y as usize - 1][x as usize - 1]) as u8;
+                            Self::lerp(0.0, 255.0, forces[y as usize - 1][x as usize - 1].y) as u8;
 
                         let dens =
                             Self::lerp(0.0, 255.0, added_densities[y as usize - 1][x as usize - 1])
@@ -467,53 +459,55 @@ impl ComponentSystem for SimulatorComponent {
                             "last_mouse_info".to_string(),
                         )
                         .unwrap() = ((*x, *y), std::time::Instant::now());
-                }
-                let forces_x = concept_manager
-                    .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_x".to_string())
-                    .unwrap();
-                for i in 0..brush_size * 2 {
-                    for j in 0..brush_size * 2 {
-                        let i = i - brush_size;
-                        let j = j - brush_size;
 
-                        let recalculated_y =
-                            (*y / scale + i).clamp(0, self.resolution as i32 - 1) as usize;
-                        let recalculated_x =
-                            (*x / scale + j).clamp(0, self.resolution as i32 - 1) as usize;
+                    let forces = concept_manager
+                        .get_concept_mut::<Vec<Vec<nalgebra::Vector2<f32>>>>(self.id, "forces".to_string())
+                        .unwrap();
 
-                        let dist = ((i * i + j * j) as f32).sqrt();
-                        if dist < brush_size as f32 {
-                            let diff = (x - last_x) as f32;
-                            let vel = diff
-                                / (20.0/* * engine_details.last_frame_duration.as_millis() as f32 */);
+                    for i in 0..brush_size * 2 {
+                        for j in 0..brush_size * 2 {
+                            let i = i - brush_size;
+                            let j = j - brush_size;
 
-                            forces_x[recalculated_y][recalculated_x] =
-                                vel * vel_mul * (-1.0 * brush_size as f32 - dist);
+                            let recalculated_y =
+                                (*y / scale + i).clamp(0, self.resolution as i32 - 1) as usize;
+                            let recalculated_x =
+                                (*x / scale + j).clamp(0, self.resolution as i32 - 1) as usize;
+
+                            let dist = ((i * i + j * j) as f32).sqrt();
+                            if dist < brush_size as f32 {
+                                let diff_x = (x - last_x) as f32;
+                                let diff_y = (y - last_y) as f32;
+                                let vel = nalgebra::Vector2::new(diff_x / 20.0, diff_y / 20.0);
+
+                                forces[recalculated_y][recalculated_x] =
+                                    vel * vel_mul * (-1.0 * brush_size as f32 - dist);
+                            }
                         }
                     }
-                }
-                let forces_y = concept_manager
-                    .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
-                    .unwrap();
+                    /* let forces_y = concept_manager
+                        .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
+                        .unwrap();
 
-                for i in 0..brush_size * 2 {
-                    for j in 0..brush_size * 2 {
-                        let recalculated_y =
-                            (*y / scale + i).clamp(0, self.resolution as i32 - 1) as usize;
-                        let recalculated_x =
-                            (*x / scale + j).clamp(0, self.resolution as i32 - 1) as usize;
+                    for i in 0..brush_size * 2 {
+                        for j in 0..brush_size * 2 {
+                            let recalculated_y =
+                                (*y / scale + i).clamp(0, self.resolution as i32 - 1) as usize;
+                            let recalculated_x =
+                                (*x / scale + j).clamp(0, self.resolution as i32 - 1) as usize;
 
-                        let i = i - brush_size;
-                        let j = j - brush_size;
-                        let dist = ((i * i + j * j) as f32).sqrt();
-                        if dist < brush_size as f32 {
-                            let diff = (y - last_y) as f32;
-                            let vel = diff
-                                / (20.0/* * engine_details.last_frame_duration.as_millis() as f32 */);
+                            let i = i - brush_size;
+                            let j = j - brush_size;
+                            let dist = ((i * i + j * j) as f32).sqrt();
+                            if dist < brush_size as f32 {
+                                let diff = (y - last_y) as f32;
+                                let vel = diff
+                                    / (20.0/* * engine_details.last_frame_duration.as_millis() as f32 */);
 
-                            forces_y[recalculated_y][recalculated_x] = vel * vel_mul * dist;
+                                forces_y[recalculated_y][recalculated_x] = vel * vel_mul * dist;
+                            }
                         }
-                    }
+                    } */
                 }
             }
 
@@ -533,9 +527,9 @@ impl ComponentSystem for SimulatorComponent {
                                 [((*x / scale + j) as usize).clamp(0, self.resolution - 1)] +=
                                 dens_mul
                                     * if scancodes.contains(&sdl2::keyboard::Scancode::LShift) {
-                                        -2.0
+                                        -0.1
                                     } else {
-                                        2.0
+                                        0.1
                                     };
                         }
                     }

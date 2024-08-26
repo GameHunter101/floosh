@@ -55,7 +55,7 @@ async fn main() {
             device.clone(),
             queue.clone(),
             "shaders/compute.wgsl",
-            (sim_res as u32 + 2, sim_res as u32, 1 + 2),
+            (sim_res as u32 + 2, sim_res as u32 + 2, 1),
             gamezap::compute::ComputePipelineType::<f32> {
                 input_data: vec![
                     gamezap::compute::ComputeData::TextureData((
