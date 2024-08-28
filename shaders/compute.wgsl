@@ -8,7 +8,18 @@
 // x_1          : 2 | b
 // y_1          : 3 | a
 @group(0) @binding(1) var pressure_grid: texture_storage_2d<rgba8unorm, read_write>;
-@group(0) @binding(2) var addition_grid: texture_storage_2d<rgba8unorm, read_write>;
+
+struct Test {
+    values: array<Items>,
+};
+
+struct Items {
+    vel: vec2<f32>,
+    pos: vec2<f32>,
+}
+
+@group(0) @binding(2) var<storage> added_velocities: Test;
+// @group(0) @binding(3) var<storage> added_densities: array<f32>;
 
 // new x velocity   : 0 | r
 // new y velocity   : 1 | g
@@ -347,18 +358,31 @@ fn boundary(x: i32, y: i32, is_pressure: bool, offset: vec2<i32>) {
     }
 }
 
+fn calc_splat(x: i32, y: i32, dt: f32, radius: f32) {
+    var accumulation = vec2f(0.0);
+    for (var i = 0; i < i32(arrayLength(&added_velocities.values)); i++) {
+        let new_vec = vec2f(f32(x), f32(y)) - added_velocities.values[0].pos;
+        accumulation += added_velocities.values[0].vel * dt * vec2f(exp(-1.0 * dot(new_vec, new_vec) / radius));
+    }
+
+    textureStore(velocity_grid, vec2i(x, y), vec4f(accumulation, 0.0, 1.0));
+}
 
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = i32(global_id.x);
     let y = i32(global_id.y);
 
+
     let resolution = 256u;
     let viscosity = 0.000001f;
     let diffusion = 0.0f;
     let num_iters = 30i;
     let dt = 0.1f;
-    // if x != 0 && y != 0 && x != i32(resolution) + 1 && y != i32(resolution) + 1 {
+    let radius = 35.0;
+
+    calc_splat(x, y, dt, radius);
+    /* // if x != 0 && y != 0 && x != i32(resolution) + 1 && y != i32(resolution) + 1 {
 
         let added_vel_x = textureLoad(addition_grid, vec2i(x, y))[0] * dt;
         let added_vel_y = textureLoad(addition_grid, vec2i(x, y))[1] * dt;
@@ -427,4 +451,5 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             boundary(x, y, true, vec2i(0, -1));
         }
     } */
+    */
 }

@@ -1,5 +1,7 @@
 use cool_utils::data_structures::ring_buffer::RingBuffer;
-use gamezap::new_component;
+use gamezap::{compute::ComputePackagedData, new_component};
+use nalgebra::Vector2;
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 new_component!(SimulatorComponent {
     resolution: usize,
@@ -42,11 +44,11 @@ impl SimulatorComponent {
         let mut concepts: HashMap<String, Box<dyn Any>> = HashMap::new();
         concepts.insert(
             "forces".to_string(),
-            Box::new(vec![vec![nalgebra::Vector2::<f32>::zeros(); resolution]; resolution]),
+            Box::<Vec<(nalgebra::Vector2<f32>, i32, i32)>>::default(),
         );
         concepts.insert(
             "added_densities".to_string(),
-            Box::new(vec![vec![0.0_f32; resolution]; resolution]),
+            Box::<Vec<(f32, i32, i32)>>::default(),
         );
         concepts.insert(
             "last_mouse_info".to_string(),
@@ -302,23 +304,28 @@ impl ComponentSystem for SimulatorComponent {
 
         let mut concept_manager = concept_manager.lock().unwrap();
 
-        let added_rgba = {
+        /* let added_rgba = {
             let forces = concept_manager
-                .get_concept::<Vec<Vec<nalgebra::Vector2<f32>>>>(self.id, "forces".to_string())
+                .get_concept::<Vec<(nalgebra::Vector2<f32>, i32, i32)>>(
+                    self.id,
+                    "forces".to_string(),
+                )
                 .unwrap();
 
             let added_densities = concept_manager
-                .get_concept::<Vec<Vec<f32>>>(self.id, "added_densities".to_string())
+                .get_concept::<Vec<(f32, i32, i32)>>(self.id, "added_densities".to_string())
                 .unwrap();
 
-            for i in 0..self.resolution {
+            /* for i in 0..self.resolution {
                 for j in 0..self.resolution {
                     self.grid_u[i + 1][j + 1] += forces[i][j].x * dt;
                     self.grid_v[i + 1][j + 1] += forces[i][j].y * dt;
 
                     self.density_grid[i + 1][j + 1] += added_densities[i][j];
                 }
-            }
+            } */
+
+            let splat_radius = 10.0;
 
             image::RgbaImage::from_fn(
                 self.resolution as u32 + 2,
@@ -329,67 +336,87 @@ impl ComponentSystem for SimulatorComponent {
                         && y > 0
                         && y < self.resolution as u32 + 1
                     {
-                        let x_vel =
-                            Self::lerp(0.0, 255.0, forces[y as usize - 1][x as usize - 1].x) as u8;
-                        let y_vel =
-                            Self::lerp(0.0, 255.0, forces[y as usize - 1][x as usize - 1].y) as u8;
+                        let pixel_whole = Vector2::new(x as f32, y as f32);
 
-                        let dens =
-                            Self::lerp(0.0, 255.0, added_densities[y as usize - 1][x as usize - 1])
-                                as u8;
+                        let accumulated_velocity: Vector2<f32> = forces
+                            .iter()
+                            .map(|(force, x_0, y_0)| {
+                                let force_pos = Vector2::new(*x_0 as f32, *y_0 as f32);
+                                let new_vec = pixel_whole - force_pos / 3.0;
 
-                        [x_vel, y_vel, dens, 1]
+                                force * dt * (-new_vec.dot(&new_vec) / splat_radius).exp()
+                            })
+                            .sum();
+
+                        // println!("vel: {}", accumulated_velocity);
+                        // println!("{pixel_frac}, {pixel_whole}");
+
+                        let accumulated_density: f32 = added_densities
+                            .iter()
+                            .map(|(added_density, x_0, y_0)| {
+                                let force_pos = Vector2::new(*x_0 as f32, *y_0 as f32);
+                                let new_vec = pixel_whole - force_pos / 3.0;
+
+                                added_density * (-new_vec.dot(&new_vec)).exp()
+                            })
+                            .sum();
+
+                        let x_vel = Self::lerp(0.0, 255.0, accumulated_velocity.x) as u8;
+                        let y_vel = Self::lerp(0.0, 255.0, accumulated_velocity.y) as u8;
+
+                        let dens = Self::lerp(0.0, 255.0, accumulated_density) as u8;
+
+                        [x_vel, y_vel, dens, 255]
                     } else {
                         [0; 4]
                     };
                     image::Rgba(rgba)
                 },
             )
-        };
+        }; */
 
-        /* let added_densities = concept_manager
-            .get_concept_mut::<Vec<Vec<f32>>>(self.id, "added_densities".to_string())
+        let forces = concept_manager
+            .get_concept_mut::<Vec<(nalgebra::Vector2<f32>, i32, i32)>>(
+                self.id,
+                "forces".to_string(),
+            )
             .unwrap();
 
-        *added_densities = vec![vec![0.0; self.resolution]; self.resolution];
+        let buffer = forces
+            .iter()
+            .flat_map(|(force, x, y)| {
+                bytemuck::cast_slice(&[force.x, force.y, *x as f32 / 3.0, *y as f32 / 3.0]).to_vec()
+            })
+            .collect::<Vec<u8>>();
 
-        let forces_x = concept_manager
-            .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_x".to_string())
+        // println!("{buffer:?}");
+        if !buffer.is_empty() {
+            compute_pipelines[self.compute_index].update_pipeline_assets(
+                device.clone(),
+                vec![(
+                    ComputePackagedData::Buffer(Rc::new(device.create_buffer_init(
+                        &BufferInitDescriptor {
+                            label: Some("Added velocity array"),
+                            contents: &buffer,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::MAP_READ,
+                        },
+                    ))),
+                    2,
+                )],
+            );
+        }
+
+        forces.clear();
+
+        let added_densities = concept_manager
+            .get_concept_mut::<Vec<(f32, i32, i32)>>(self.id, "added_densities".to_string())
             .unwrap();
 
-        *forces_x = vec![vec![0.0; self.resolution]; self.resolution];
-
-        let forces_y = concept_manager
-            .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
-            .unwrap();
-        *forces_y = vec![vec![0.0; self.resolution]; self.resolution]; */
+        added_densities.clear();
 
         // self.simulate(dt, 5);
 
-        /* let rgba =
-        image::RgbaImage::from_fn(self.resolution as u32, self.resolution as u32, |x, y| {
-            let rgba = vec![
-                Self::lerp(
-                    0.0,
-                    255.0,
-                    self.density_grid[y as usize + 1][x as usize + 1],
-                ) as u8,
-                Self::lerp(
-                    0.0,
-                    255.0,
-                    self.density_grid[y as usize + 1][x as usize + 1],
-                ) as u8,
-                Self::lerp(
-                    0.0,
-                    255.0,
-                    self.density_grid[y as usize + 1][x as usize + 1],
-                ) as u8,
-                255,
-            ];
-            image::Rgba(rgba.try_into().unwrap())
-        }); */
-
-        let added_tex = Rc::new(
+        /* let added_tex = Rc::new(
             gamezap::texture::Texture::from_rgba(
                 &device,
                 &queue,
@@ -407,12 +434,12 @@ impl ComponentSystem for SimulatorComponent {
                 gamezap::compute::ComputePackagedData::Texture(added_tex.clone()),
                 2,
             )],
-        );
+        ); */
         let materials = materials.unwrap();
         materials.0[0].update_textures(
             device,
             &[(
-                compute_pipelines[self.compute_index].pipeline_assets[3]
+                compute_pipelines[self.compute_index].pipeline_assets[0]
                     .as_texture()
                     .unwrap()
                     .clone(),
@@ -433,7 +460,7 @@ impl ComponentSystem for SimulatorComponent {
     ) {
         let scale = 3;
         let brush_size = 20_i32;
-        let vel_mul = 20.0;
+        let vel_mul = 2.0;
         let dens_mul = 2.0;
         let fall_off = 3.0;
 
@@ -461,79 +488,34 @@ impl ComponentSystem for SimulatorComponent {
                         .unwrap() = ((*x, *y), std::time::Instant::now());
 
                     let forces = concept_manager
-                        .get_concept_mut::<Vec<Vec<nalgebra::Vector2<f32>>>>(self.id, "forces".to_string())
+                        .get_concept_mut::<Vec<(nalgebra::Vector2<f32>, i32, i32)>>(
+                            self.id,
+                            "forces".to_string(),
+                        )
                         .unwrap();
 
-                    for i in 0..brush_size * 2 {
-                        for j in 0..brush_size * 2 {
-                            let i = i - brush_size;
-                            let j = j - brush_size;
+                    let diff_x = (x - last_x) as f32;
+                    let diff_y = (y - last_y) as f32;
+                    let vel = nalgebra::Vector2::new(diff_x / 20.0, diff_y / 20.0) * vel_mul;
 
-                            let recalculated_y =
-                                (*y / scale + i).clamp(0, self.resolution as i32 - 1) as usize;
-                            let recalculated_x =
-                                (*x / scale + j).clamp(0, self.resolution as i32 - 1) as usize;
-
-                            let dist = ((i * i + j * j) as f32).sqrt();
-                            if dist < brush_size as f32 {
-                                let diff_x = (x - last_x) as f32;
-                                let diff_y = (y - last_y) as f32;
-                                let vel = nalgebra::Vector2::new(diff_x / 20.0, diff_y / 20.0);
-
-                                forces[recalculated_y][recalculated_x] =
-                                    vel * vel_mul * (-1.0 * brush_size as f32 - dist);
-                            }
-                        }
-                    }
-                    /* let forces_y = concept_manager
-                        .get_concept_mut::<Vec<Vec<f32>>>(self.id, "forces_y".to_string())
-                        .unwrap();
-
-                    for i in 0..brush_size * 2 {
-                        for j in 0..brush_size * 2 {
-                            let recalculated_y =
-                                (*y / scale + i).clamp(0, self.resolution as i32 - 1) as usize;
-                            let recalculated_x =
-                                (*x / scale + j).clamp(0, self.resolution as i32 - 1) as usize;
-
-                            let i = i - brush_size;
-                            let j = j - brush_size;
-                            let dist = ((i * i + j * j) as f32).sqrt();
-                            if dist < brush_size as f32 {
-                                let diff = (y - last_y) as f32;
-                                let vel = diff
-                                    / (20.0/* * engine_details.last_frame_duration.as_millis() as f32 */);
-
-                                forces_y[recalculated_y][recalculated_x] = vel * vel_mul * dist;
-                            }
-                        }
-                    } */
+                    forces.push((vel, *x, *y));
                 }
             }
 
             if mousestate.right() {
                 let scancodes = &engine_details.pressed_scancodes;
                 let added_densities = concept_manager
-                    .get_concept_mut::<Vec<Vec<f32>>>(self.id, "added_densities".to_string())
+                    .get_concept_mut::<Vec<(f32, i32, i32)>>(self.id, "added_densities".to_string())
                     .unwrap();
 
-                for i in 0..brush_size * 2 {
-                    for j in 0..brush_size * 2 {
-                        let i = i - brush_size;
-                        let j = j - brush_size;
-                        if ((i * i + j * j) as f32).sqrt() < brush_size as f32 {
-                            added_densities
-                                [((*y / scale + i) as usize).clamp(0, self.resolution - 1)]
-                                [((*x / scale + j) as usize).clamp(0, self.resolution - 1)] +=
-                                dens_mul
-                                    * if scancodes.contains(&sdl2::keyboard::Scancode::LShift) {
-                                        -0.1
-                                    } else {
-                                        0.1
-                                    };
-                        }
-                    }
-                }
+                let added_density = dens_mul
+                    * if scancodes.contains(&sdl2::keyboard::Scancode::LShift) {
+                        -0.1
+                    } else {
+                        0.1
+                    };
+
+                added_densities.push((added_density, *x, *y));
             }
         }
     }
