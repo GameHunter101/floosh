@@ -412,6 +412,30 @@ impl ComponentSystem for SimulatorComponent {
             .get_concept_mut::<Vec<(f32, i32, i32)>>(self.id, "added_densities".to_string())
             .unwrap();
 
+        let density_buffer = added_densities
+            .iter()
+            .flat_map(|(density, x, y)| {
+                bytemuck::cast_slice(&[*density, 0.0, *x as f32 / 3.0, *y as f32 / 3.0]).to_vec()
+            })
+            .collect::<Vec<u8>>();
+
+        if !density_buffer.is_empty() {
+            compute_pipelines[self.compute_index].update_pipeline_assets(
+                device.clone(),
+                vec![(
+                    ComputePackagedData::Buffer(Rc::new(device.create_buffer_init(
+                        &BufferInitDescriptor {
+                            label: Some("Added density array"),
+                            contents: &density_buffer,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::MAP_READ,
+                        },
+                    ))),
+                    3,
+                )],
+            );
+        }
+
+
         added_densities.clear();
 
         // self.simulate(dt, 5);
@@ -439,7 +463,7 @@ impl ComponentSystem for SimulatorComponent {
         materials.0[0].update_textures(
             device,
             &[(
-                compute_pipelines[self.compute_index].pipeline_assets[0]
+                compute_pipelines[self.compute_index].pipeline_assets[4]
                     .as_texture()
                     .unwrap()
                     .clone(),

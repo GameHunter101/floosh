@@ -55,7 +55,7 @@ async fn main() {
             device.clone(),
             queue.clone(),
             "shaders/compute.wgsl",
-            (sim_res as u32 + 2, sim_res as u32 + 2, 1),
+            (sim_res as u32, sim_res as u32, 1),
             gamezap::compute::ComputePipelineType {
                 input_data: vec![
                     gamezap::compute::ComputeData::TextureData((
@@ -72,8 +72,8 @@ async fn main() {
                         )),
                         true,
                     )),
-                    gamezap::compute::ComputeData::ArrayData(bytemuck::cast_slice(&[1.0_f32, 0.0, 100.0, 100.0])),
-                    // gamezap::compute::ComputeData::ArrayData(bytemuck::cast_slice(&[0.0_f32;3]))
+                    gamezap::compute::ComputeData::ArrayData(bytemuck::cast_slice(&[0.0_f32; 4])),
+                    gamezap::compute::ComputeData::ArrayData(bytemuck::cast_slice(&[0.0_f32; 4]))
                 ],
                 output_data_type: vec![gamezap::compute::ComputeOutput::Texture((
                     sim_res as u32,
